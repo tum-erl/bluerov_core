@@ -586,55 +586,55 @@ class BlueROVLocalizationNode(Node):
                         f" Y={rov_yaw:+.0f}"
                     )
 
-                    cv2.putText(
-                        frame,
-                        status_text,
-                        (30, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (0, 255, 255),
-                        2,
-                    )
-                    cv2.putText(
-                        frame,
-                        pos_text,
-                        (30, 75),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (0, 255, 0),
-                        2,
-                    )
-                    cv2.putText(
-                        frame,
-                        rot_text,
-                        (30, 110),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (0, 255, 0),
-                        2,
-                    )
-                else:
-                    cv2.putText(
-                        frame,
-                        "PnP Solver Failed",
-                        (30, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (0, 0, 255),
-                        2,
-                    )
-            else:
-                cv2.putText(
-                    frame,
-                    "No known tags in view",
-                    (30, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 0, 255),
-                    2,
-                )
+            #         cv2.putText(
+            #             frame,
+            #             status_text,
+            #             (30, 40),
+            #             cv2.FONT_HERSHEY_SIMPLEX,
+            #             0.7,
+            #             (0, 255, 255),
+            #             2,
+            #         )
+            #         cv2.putText(
+            #             frame,
+            #             pos_text,
+            #             (30, 75),
+            #             cv2.FONT_HERSHEY_SIMPLEX,
+            #             0.7,
+            #             (0, 255, 0),
+            #             2,
+            #         )
+            #         cv2.putText(
+            #             frame,
+            #             rot_text,
+            #             (30, 110),
+            #             cv2.FONT_HERSHEY_SIMPLEX,
+            #             0.7,
+            #             (0, 255, 0),
+            #             2,
+            #         )
+            #     else:
+            #         cv2.putText(
+            #             frame,
+            #             "PnP Solver Failed",
+            #             (30, 40),
+            #             cv2.FONT_HERSHEY_SIMPLEX,
+            #             0.7,
+            #             (0, 0, 255),
+            #             2,
+            #         )
+            # else:
+            #     cv2.putText(
+            #         frame,
+            #         "No known tags in view",
+            #         (30, 40),
+            #         cv2.FONT_HERSHEY_SIMPLEX,
+            #         0.7,
+            #         (0, 0, 255),
+            #         2,
+            #     )
 
-            cv2.imshow("BlueROV2 Localization (Global Multi-Tag PnP)", frame)
+            # cv2.imshow("BlueROV2 Localization (Global Multi-Tag PnP)", frame)
 
         # 4. GUI EVENTS & EXIT HANDLING
         with self.profiler.time_block("4_gui_events"):

@@ -418,59 +418,59 @@ class BlueROVLocalizationNode(Node):
                     f" Y={rov_yaw:+.0f}"
                 )
 
-                cv2.putText(
-                    frame,
-                    status_text,
-                    (30, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 255, 255),
-                    2,
-                )
-                cv2.putText(
-                    frame,
-                    pos_text,
-                    (30, 75),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 255, 0),
-                    2,
-                )
-                cv2.putText(
-                    frame,
-                    rot_text,
-                    (30, 110),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 255, 0),
-                    2,
-                )
-            else:
-                cv2.putText(
-                    frame,
-                    "PnP Solver Failed",
-                    (30, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 0, 255),
-                    2,
-                )
-        else:
-            cv2.putText(
-                frame,
-                "No known tags in view",
-                (30, 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 0, 255),
-                2,
-            )
+        #         cv2.putText(
+        #             frame,
+        #             status_text,
+        #             (30, 40),
+        #             cv2.FONT_HERSHEY_SIMPLEX,
+        #             0.7,
+        #             (0, 255, 255),
+        #             2,
+        #         )
+        #         cv2.putText(
+        #             frame,
+        #             pos_text,
+        #             (30, 75),
+        #             cv2.FONT_HERSHEY_SIMPLEX,
+        #             0.7,
+        #             (0, 255, 0),
+        #             2,
+        #         )
+        #         cv2.putText(
+        #             frame,
+        #             rot_text,
+        #             (30, 110),
+        #             cv2.FONT_HERSHEY_SIMPLEX,
+        #             0.7,
+        #             (0, 255, 0),
+        #             2,
+        #         )
+        #     else:
+        #         cv2.putText(
+        #             frame,
+        #             "PnP Solver Failed",
+        #             (30, 40),
+        #             cv2.FONT_HERSHEY_SIMPLEX,
+        #             0.7,
+        #             (0, 0, 255),
+        #             2,
+        #         )
+        # else:
+        #     cv2.putText(
+        #         frame,
+        #         "No known tags in view",
+        #         (30, 40),
+        #         cv2.FONT_HERSHEY_SIMPLEX,
+        #         0.7,
+        #         (0, 0, 255),
+        #         2,
+        #     )
 
-        cv2.imshow("BlueROV2 Localization (Global Multi-Tag PnP)", frame)
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            self.get_logger().info("Exit key 'q' pressed.")
-            self.is_running = False
-            rclpy.shutdown()
+        # cv2.imshow("BlueROV2 Localization (Global Multi-Tag PnP)", frame)
+        # if cv2.waitKey(1) & 0xFF == ord("q"):
+        #     self.get_logger().info("Exit key 'q' pressed.")
+        #     self.is_running = False
+        #     rclpy.shutdown()
 
     def destroy_node(self):
         self.is_running = False
