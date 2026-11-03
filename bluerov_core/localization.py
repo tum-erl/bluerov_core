@@ -267,10 +267,10 @@ class BlueROVLocalizationNode(Node):
         self.video = Video(port=self.port)
         self.detector = apriltag.Detector(
             families=TAG_FAMILY,
-            nthreads=4,
-            quad_decimate=1.0,
-            quad_sigma=0.0,
-            refine_edges=1,
+            nthreads=4, # number of threads of CPU
+            quad_decimate=2.0, # down-sample factor for faster detection
+            quad_sigma=0.0, # no Gaussian blur for speed
+            refine_edges=0, # no edge refinement for speed
         )
 
         self.get_logger().info(f"Connecting to UDP stream on port {self.port}...")
