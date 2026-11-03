@@ -3,14 +3,18 @@
 BlueROV2 AprilTag Camera Localization ROS 2 Node (Jazzy)
 Node: rov_localization_node
 Features:
-- Pure Event-Driven Processing with GStreamer Decode Profiling
-- FULL FRAME SCAN on EVERY step (No ROI logic)
-- Execution Benchmarking & Summary Profiling on exit ('q')
+- Event-Driven Processing with dedicated worker thread (Condition variable)
+- Modular GStreamer pipeline configuration with zero-latency drop (max-buffers=1)
+- GStreamer H.264 parse-to-sample decode probe profiling
+- Dictionary-based AprilTag deduplication for robust PnP solving
+- Modular Pipeline Profiler with execution metrics & horizontal summary chart on exit
+- Clean thread join & shutdown cleanup
 Topics Published:
 - /rov/pose (geometry_msgs/msg/PoseStamped)
 - /rov/pose_human_readable (std_msgs/msg/String)
 """
 
+import threading
 import time
 from collections import defaultdict
 import cv2
@@ -27,23 +31,27 @@ from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
 from std_msgs.msg import String
 
+
 # ==============================================================================
 # 0. PROFILER CLASS
 # ==============================================================================
 class PipelineProfiler:
-    """Καταγράφει χρόνους εκτέλεσης ανά block και παράγει γράφημα μέσων όρων."""
+    """Καταγράφει χρόνους εκτέλεσης ανά block και παράγει συγκεντρωτικό γράφημα."""
 
     def __init__(self):
         self.stage_times = defaultdict(list)
+        self.lock = threading.Lock()
 
     def add_timing(self, stage_name, duration_ms):
-        self.stage_times[stage_name].append(duration_ms)
+        with self.lock:
+            self.stage_times[stage_name].append(duration_ms)
 
     def time_block(self, stage_name):
         class _TimerContext:
             def __init__(self, profiler, name):
                 self.profiler = profiler
                 self.name = name
+                self.start_time = None
 
             def __enter__(self):
                 self.start_time = time.perf_counter()
@@ -51,24 +59,28 @@ class PipelineProfiler:
 
             def __exit__(self, exc_type, exc_val, exc_tb):
                 elapsed_ms = (time.perf_counter() - self.start_time) * 1000.0
-                self.profiler.stage_times[self.name].append(elapsed_ms)
+                with self.profiler.lock:
+                    self.profiler.stage_times[self.name].append(elapsed_ms)
 
         return _TimerContext(self, stage_name)
 
     def plot_summary(self):
-        if not self.stage_times:
-            print("[Profiler] Δεν καταγράφηκαν δεδομένα.")
-            return
+        with self.lock:
+            if not self.stage_times:
+                print("[Profiler] Δεν καταγράφηκαν δεδομένα χρονισμού.")
+                return
+            stage_keys = list(self.stage_times.keys())
+            stage_data = {k: list(v) for k, v in self.stage_times.items()}
 
-        stages = list(self.stage_times.keys())
-        avg_times = [np.mean(self.stage_times[s]) for s in stages]
+        stages = stage_keys
+        avg_times = [np.mean(stage_data[s]) for s in stages]
 
         compute_stages = [s for s in stages if "inter_frame" not in s]
-        compute_avg_ms = sum(np.mean(self.stage_times[s]) for s in compute_stages)
+        compute_avg_ms = sum(np.mean(stage_data[s]) for s in compute_stages)
         max_possible_fps = 1000.0 / compute_avg_ms if compute_avg_ms > 0 else 0.0
 
-        if "0_inter_frame_interval" in self.stage_times:
-            avg_interval_ms = np.mean(self.stage_times["0_inter_frame_interval"])
+        if "0_inter_frame_interval" in stage_data:
+            avg_interval_ms = np.mean(stage_data["0_inter_frame_interval"])
             actual_camera_fps = 1000.0 / avg_interval_ms if avg_interval_ms > 0 else 0.0
         else:
             actual_camera_fps = max_possible_fps
@@ -98,15 +110,15 @@ class PipelineProfiler:
         ax.invert_yaxis()
         ax.set_xlabel("Μέσος Χρόνος (ms)", fontsize=11, fontweight="bold")
         ax.set_title(
-            f"Pipeline Profiling (FULL FRAME SCAN - No ROI)\n"
-            f"Συνολικό Latency Επεξεργασίας: {compute_avg_ms:.2f} ms | Πραγματικό Stream: ~{actual_camera_fps:.1f} FPS",
+            f"Pipeline Profiling (Full Frame - Event-Driven Worker)\n"
+            f"Συνολικό Latency Επεξεργασίας: {compute_avg_ms:.2f} ms | Ρυθμός Stream: ~{actual_camera_fps:.1f} FPS",
             fontsize=12,
             fontweight="bold",
             pad=14,
         )
 
         max_val = max(avg_times) if avg_times else 1.0
-        ax.set_xlim(0, max_val * 1.28)
+        ax.set_xlim(0, max_val * 1.30)
 
         for bar, avg_t, stage_name in zip(bars, avg_times, stages):
             if "inter_frame" in stage_name:
@@ -126,20 +138,20 @@ class PipelineProfiler:
             )
 
         plt.tight_layout()
-        print("\n" + "=" * 60)
-        print(" PIPELINE & GSTREAMER DECODE PROFILING REPORT")
-        print("=" * 60)
+        print("\n" + "=" * 65)
+        print(" PIPELINE & GSTREAMER PROFILING REPORT")
+        print("=" * 65)
         for s, avg_t in zip(stages, avg_times):
             if "inter_frame" in s:
                 print(f" * {s:<28}: {avg_t:6.2f} ms (Camera Frame Rate: ~{actual_camera_fps:.1f} FPS)")
             else:
                 pct = (avg_t / compute_avg_ms) * 100.0 if compute_avg_ms > 0 else 0
                 print(f" - {s:<28}: {avg_t:6.2f} ms ({pct:5.1f}%)")
-        print("-" * 60)
+        print("-" * 65)
         print(f" Total Per-Frame Latency     : {compute_avg_ms:6.2f} ms")
         print(f" Max Theoretical Compute Rate: {max_possible_fps:6.1f} Hz")
         print(f" Actual Inbound Camera Rate  : {actual_camera_fps:6.1f} FPS")
-        print("=" * 60 + "\n")
+        print("=" * 65 + "\n")
 
         plt.show()
 
@@ -147,18 +159,27 @@ class PipelineProfiler:
 # ==============================================================================
 # 1. GLOBAL CONFIGURATION & TAG MAP
 # ==============================================================================
-REFERENCE_TAG_ID = 0
-TAG_SIZE_METERS = 0.06
+REFERENCE_TAG_ID = 0  # Defines origin of coordinate system (0,0,0)
+TAG_SIZE_METERS = 0.06  # Tag black square side length in meters
 TAG_FAMILY = "tagStandard41h12"
 
 TAG_MAP = {
-    0: {"pos": [0.0, 0.0, 0.0], "rpy": [0.0, 0.0, 0.0]},
-    1: {"pos": [0.21, 0.0, 0.0], "rpy": [0.0, 0.0, 0.0]},
-    2: {"pos": [0.0, 0.40, 0.0], "rpy": [0.0, 0.0, 0.0]},
+    0: {
+        "pos": [0.0, 0.0, 0.0],
+        "rpy": [0.0, 0.0, 0.0],
+    },
+    1: {
+        "pos": [0.21, 0.0, 0.0],
+        "rpy": [0.0, 0.0, 0.0],
+    },
+    2: {
+        "pos": [0.0, 0.40, 0.0],
+        "rpy": [0.0, 0.0, 0.0],
+    },
 }
 
 # ==============================================================================
-# 2. BLUEROV2 CAMERA INTRINSICS
+# 2. CAMERA INTRINSICS & RIGID OFFSETS
 # ==============================================================================
 FRAME_WIDTH = 1920
 FRAME_HEIGHT = 1080
@@ -175,44 +196,61 @@ CAMERA_TO_BODY_OFFSET = np.array([[0.0], [0.0], [-0.00]])
 
 
 # ==============================================================================
-# 3. BLUEROV2 EVENT-DRIVEN GSTREAMER VIDEO CAPTURE (PROFILED)
+# 3. BLUEROV2 VIDEO CAPTURE CLASS (GSTREAMER PROFILED)
 # ==============================================================================
-class EventDrivenVideo:
-    """GStreamer capture με probes μέτρησης χρόνου H.264 αποκωδικοποίησης."""
+class Video:
+    """BlueROV video capture class με modular GStreamer pipeline, drop=true και profiling probes."""
 
-    def __init__(self, port=5600, frame_callback=None, profiler=None):
+    def __init__(self, port=5600, profiler=None):
         Gst.init(None)
 
         self.port = port
-        self.frame_callback = frame_callback
         self.profiler = profiler
+
+        self.latest_frame = None
+        self.running = True
+        self.condition = threading.Condition()
 
         self.last_frame_arrival_time = None
         self.current_h264_packet_time = None
 
-        self.video_pipe = None
-        self.video_sink = None
-        self.run()
-
-    def run(self):
-        pipeline_desc = (
-            f"udpsrc port={self.port} ! "
-            f"application/x-rtp, payload=96 ! rtph264depay ! "
-            f"h264parse name=my_parser ! "
-            f"openh264dec ! decodebin ! videoconvert ! video/x-raw,format=(string)BGR ! videoconvert ! "
-            f"appsink name=my_sink emit-signals=true sync=false max-buffers=1 drop=true"
+        self.video_source = f"udpsrc port={self.port}"
+        self.video_codec = (
+            "! application/x-rtp, payload=96 ! rtph264depay ! h264parse name=my_parser !"
+            " openh264dec"
+        )
+        self.video_decode = (
+            "! decodebin ! videoconvert ! video/x-raw,format=(string)BGR !"
+            " videoconvert"
+        )
+        self.video_sink_conf = (
+            "! appsink name=appsink0 emit-signals=true sync=false max-buffers=1 drop=true"
         )
 
-        self.video_pipe = Gst.parse_launch(pipeline_desc)
-        self.video_sink = self.video_pipe.get_by_name("my_sink")
-        parser = self.video_pipe.get_by_name("my_parser")
+        self.video_pipe = None
+        self.video_sink = None
 
-        if parser:
+        self.run()
+
+    def start_gst(self, config=None):
+        if not config:
+            config = [
+                "videotestsrc ! decodebin",
+                "! videoconvert ! video/x-raw,format=(string)BGR ! videoconvert",
+                "! appsink name=appsink0",
+            ]
+
+        command = " ".join(config)
+        self.video_pipe = Gst.parse_launch(command)
+        self.video_sink = self.video_pipe.get_by_name("appsink0")
+
+        # Probe στο src pad του h264parse για μέτρηση decode latency
+        parser = self.video_pipe.get_by_name("my_parser")
+        if parser and self.profiler:
             src_pad = parser.get_static_pad("src")
             if src_pad:
                 src_pad.add_probe(Gst.PadProbeType.BUFFER, self._on_h264_buffer_in)
 
-        self.video_sink.connect("new-sample", self.callback)
         self.video_pipe.set_state(Gst.State.PLAYING)
 
     def _on_h264_buffer_in(self, pad, info):
@@ -234,17 +272,27 @@ class EventDrivenVideo:
         )
         return array
 
+    def run(self):
+        self.start_gst([
+            self.video_source,
+            self.video_codec,
+            self.video_decode,
+            self.video_sink_conf,
+        ])
+        self.video_sink.connect("new-sample", self.callback)
+
     def callback(self, sink):
         recv_time = time.perf_counter()
 
-        if self.last_frame_arrival_time is not None and self.profiler:
-            inter_frame_ms = (recv_time - self.last_frame_arrival_time) * 1000.0
-            self.profiler.add_timing("0_inter_frame_interval", inter_frame_ms)
-        self.last_frame_arrival_time = recv_time
+        if self.profiler:
+            if self.last_frame_arrival_time is not None:
+                inter_frame_ms = (recv_time - self.last_frame_arrival_time) * 1000.0
+                self.profiler.add_timing("0_inter_frame_interval", inter_frame_ms)
+            self.last_frame_arrival_time = recv_time
 
-        if self.current_h264_packet_time is not None and self.profiler:
-            decode_ms = (recv_time - self.current_h264_packet_time) * 1000.0
-            self.profiler.add_timing("0_gst_h264_decode", decode_ms)
+            if self.current_h264_packet_time is not None:
+                decode_ms = (recv_time - self.current_h264_packet_time) * 1000.0
+                self.profiler.add_timing("0_gst_h264_decode", decode_ms)
 
         sample = sink.emit("pull-sample")
         if sample:
@@ -256,18 +304,35 @@ class EventDrivenVideo:
             else:
                 frame = self.gst_to_opencv(sample)
 
-            if self.frame_callback:
-                self.frame_callback(frame)
+            with self.condition:
+                self.latest_frame = frame
+                self.condition.notify()
 
         return Gst.FlowReturn.OK
 
+    def get_latest_frame_blocking(self):
+        """Μπλοκάρει αποδοτικά μέχρι να φτάσει νέο frame από το GStreamer."""
+        with self.condition:
+            while self.latest_frame is None and self.running:
+                self.condition.wait(timeout=0.1)
+
+            if not self.running:
+                return None
+
+            frame = self.latest_frame
+            self.latest_frame = None  # Consume frame
+            return frame
+
     def stop(self):
+        self.running = False
+        with self.condition:
+            self.condition.notify_all()
         if self.video_pipe:
             self.video_pipe.set_state(Gst.State.NULL)
 
 
 # ==============================================================================
-# 4. ROTATIONS & 3D CORNER GENERATION
+# 4. HELPER FUNCTIONS: ROTATIONS & 3D CORNER GENERATION
 # ==============================================================================
 def rpy_to_rotation_matrix(rpy_deg):
     r_rad, p_rad, y_rad = np.radians(rpy_deg)
@@ -337,7 +402,12 @@ def rotation_matrix_to_quaternion(R):
 def build_global_tag_corners(tag_map, tag_size):
     s = tag_size / 2.0
     local_corners = np.array(
-        [[-s, s, 0.0], [s, s, 0.0], [s, -s, 0.0], [-s, -s, 0.0]],
+        [
+            [-s, s, 0.0],
+            [s, s, 0.0],
+            [s, -s, 0.0],
+            [-s, -s, 0.0],
+        ],
         dtype=np.float32,
     )
 
@@ -345,6 +415,7 @@ def build_global_tag_corners(tag_map, tag_size):
     for tag_id, transform in tag_map.items():
         R = rpy_to_rotation_matrix(transform["rpy"])
         t = np.array(transform["pos"], dtype=np.float32).reshape(3, 1)
+
         corners_global = (R @ local_corners.T + t).T
         global_corners_map[tag_id] = corners_global
 
@@ -355,7 +426,7 @@ GLOBAL_TAG_CORNERS = build_global_tag_corners(TAG_MAP, TAG_SIZE_METERS)
 
 
 # ==============================================================================
-# 5. ROS 2 NODE CLASS (FULL SCAN EVERY STEP)
+# 5. ROS 2 NODE CLASS
 # ==============================================================================
 class BlueROVLocalizationNode(Node):
 
@@ -369,12 +440,14 @@ class BlueROVLocalizationNode(Node):
             self.get_parameter("world_frame_id").get_parameter_value().string_value
         )
 
+        # Publishers
         self.pose_pub = self.create_publisher(PoseStamped, "rov/pose", 10)
         self.human_pub = self.create_publisher(String, "rov/pose_human_readable", 10)
 
+        # Profiler instance
         self.profiler = PipelineProfiler()
 
-        # Detector ρυθμίσεις (σταθερές για σύγκριση)
+        # Detector configuration
         self.detector = apriltag.Detector(
             families=TAG_FAMILY,
             nthreads=4,
@@ -384,26 +457,37 @@ class BlueROVLocalizationNode(Node):
         )
 
         self.get_logger().info(f"Connecting to UDP stream on port {self.port}...")
-        self.video = EventDrivenVideo(
-            port=self.port,
-            frame_callback=self.on_new_frame,
-            profiler=self.profiler,
-        )
-        self.get_logger().info("Video receiver initialized (FULL FRAME SCAN mode).")
+        self.video = Video(port=self.port, profiler=self.profiler)
 
-    def on_new_frame(self, frame):
-        """Εκτελείται απευθείας από το GStreamer thread μόλις παραδοθεί νέο frame."""
-        if not rclpy.ok() or frame is None:
-            return
+        # Worker thread
+        self.is_running = True
+        self.worker_thread = threading.Thread(target=self.processing_loop, daemon=True)
+        self.worker_thread.start()
+        self.get_logger().info("Localization worker thread started.")
 
+    def processing_loop(self):
+        """Εκτελεί το pipeline μόλις φτάσει νέο frame από το GStreamer."""
+        first_frame = True
+        while rclpy.ok() and self.is_running:
+            frame = self.video.get_latest_frame_blocking()
+            if frame is None:
+                continue
+
+            if first_frame:
+                self.get_logger().info("Video stream connected! Processing started.")
+                first_frame = False
+
+            self.process_pipeline(frame)
+
+    def process_pipeline(self, frame):
         # 1. PREPROCESS
         with self.profiler.time_block("1_preprocess"):
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # 2. APRILTAG DETECT (FULL FRAME SCAN ΣΕ ΚΑΘΕ ΒΗΜΑ)
+        # 2. APRILTAG DETECT
         with self.profiler.time_block("2_apriltag_detect"):
-            detected_tags_in_frame = {}
             results = self.detector.detect(gray)
+            detected_tags_in_frame = {}
             for r in results:
                 detected_tags_in_frame[r.tag_id] = r.corners
 
@@ -414,12 +498,30 @@ class BlueROVLocalizationNode(Node):
             detected_known_ids = []
 
             for tag_id, corners in detected_tags_in_frame.items():
+                corners_int = corners.astype(int)
+                for i in range(4):
+                    cv2.line(
+                        frame,
+                        tuple(corners_int[i]),
+                        tuple(corners_int[(i + 1) % 4]),
+                        (0, 255, 0),
+                        2,
+                    )
+                cv2.putText(
+                    frame,
+                    f"ID:{tag_id}",
+                    (corners_int[0][0], corners_int[0][1] - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 255, 0),
+                    2,
+                )
+
                 if tag_id in GLOBAL_TAG_CORNERS:
                     all_obj_pts.append(GLOBAL_TAG_CORNERS[tag_id])
                     all_img_pts.append(corners)
                     detected_known_ids.append(tag_id)
 
-            success = False
             if len(detected_known_ids) > 0:
                 obj_pts = np.vstack(all_obj_pts).astype(np.float64)
                 img_pts = np.vstack(all_img_pts).astype(np.float64)
@@ -452,6 +554,7 @@ class BlueROVLocalizationNode(Node):
 
                     stamp = self.get_clock().now().to_msg()
 
+                    # Publisher 1: PoseStamped (Quaternions)
                     pose_msg = PoseStamped()
                     pose_msg.header.stamp = stamp
                     pose_msg.header.frame_id = self.world_frame
@@ -464,6 +567,7 @@ class BlueROVLocalizationNode(Node):
                     pose_msg.pose.orientation.w = float(qw)
                     self.pose_pub.publish(pose_msg)
 
+                    # Publisher 2: Human-readable String format
                     human_msg = String()
                     human_msg.data = (
                         f"Position [m]: X={rov_x:+.3f}, Y={rov_y:+.3f}, Z={rov_z:+.3f} | "
@@ -532,20 +636,24 @@ class BlueROVLocalizationNode(Node):
 
             cv2.imshow("BlueROV2 Localization (Global Multi-Tag PnP)", frame)
 
-        # 4. EVENT POLLING & EXIT HANDLING
+        # 4. GUI EVENTS & EXIT HANDLING
         with self.profiler.time_block("4_gui_events"):
             if cv2.waitKey(1) & 0xFF == ord("q"):
-                self.get_logger().info("Exit key 'q' pressed. Shutting down...")
+                self.get_logger().info("Exit key 'q' pressed.")
+                self.is_running = False
                 rclpy.shutdown()
 
     def destroy_node(self):
+        self.is_running = False
         self.video.stop()
+        if hasattr(self, "worker_thread") and self.worker_thread.is_alive():
+            self.worker_thread.join(timeout=0.5)
         cv2.destroyAllWindows()
         super().destroy_node()
 
 
 # ==============================================================================
-# 7. MAIN EXECUTION
+# 6. MAIN EXECUTION
 # ==============================================================================
 def main(args=None):
     rclpy.init(args=args)

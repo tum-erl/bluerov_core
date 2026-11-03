@@ -2,11 +2,17 @@
 """
 BlueROV2 AprilTag Camera Localization ROS 2 Node (Jazzy)
 Node: rov_localization_node
+Features:
+- Event-Driven Processing with dedicated worker thread (Condition variable)
+- Modular GStreamer pipeline configuration with zero-latency drop (max-buffers=1)
+- Dictionary-based AprilTag deduplication for robust PnP solving
+- Clean thread join & shutdown cleanup
 Topics Published:
-  - /rov/pose (geometry_msgs/msg/PoseStamped)
-  - /rov/pose_human_readable (std_msgs/msg/String)
+- /rov/pose (geometry_msgs/msg/PoseStamped)
+- /rov/pose_human_readable (std_msgs/msg/String)
 """
 
+import threading
 import time
 import cv2
 import gi
@@ -24,11 +30,10 @@ from std_msgs.msg import String
 # ==============================================================================
 # 1. GLOBAL CONFIGURATION & TAG MAP
 # ==============================================================================
-REFERENCE_TAG_ID = 0  # The ID that defines the origin of the coordinate system (0,0,0)
-TAG_SIZE_METERS = 0.06  # Length of the black square side in meters
+REFERENCE_TAG_ID = 0  # Defines origin of coordinate system (0,0,0)
+TAG_SIZE_METERS = 0.06  # Tag black square side length in meters
 TAG_FAMILY = "tagStandard41h12"
 
-# Χάρτης γνωστών Tags ως προς το Reference Tag Frame:
 TAG_MAP = {
     0: {
         "pos": [0.0, 0.0, 0.0],
@@ -45,7 +50,7 @@ TAG_MAP = {
 }
 
 # ==============================================================================
-# 2. BLUEROV2 CAMERA INTRINSICS (CALIBRATION)
+# 2. CAMERA INTRINSICS & RIGID OFFSETS
 # ==============================================================================
 FRAME_WIDTH = 1920
 FRAME_HEIGHT = 1080
@@ -72,7 +77,9 @@ class Video:
 
         self.port = port
         self.latest_frame = None
-        self._new_frame = None
+        self.running = True
+
+        self.condition = threading.Condition()
 
         self.video_source = f"udpsrc port={self.port}"
         self.video_codec = (
@@ -84,7 +91,7 @@ class Video:
             " videoconvert"
         )
         self.video_sink_conf = (
-            "! appsink emit-signals=true sync=false max-buffers=2 drop=true"
+            "! appsink name=appsink0 emit-signals=true sync=false max-buffers=1 drop=true"
         )
 
         self.video_pipe = None
@@ -97,7 +104,7 @@ class Video:
             config = [
                 "videotestsrc ! decodebin",
                 "! videoconvert ! video/x-raw,format=(string)BGR ! videoconvert",
-                "! appsink",
+                "! appsink name=appsink0",
             ]
 
         command = " ".join(config)
@@ -120,15 +127,6 @@ class Video:
         )
         return array
 
-    def frame_available(self):
-        return self._new_frame is not None
-
-    def frame(self):
-        if self.frame_available():
-            self.latest_frame = self._new_frame
-            self._new_frame = None
-        return self.latest_frame
-
     def run(self):
         self.start_gst([
             self.video_source,
@@ -140,10 +138,30 @@ class Video:
 
     def callback(self, sink):
         sample = sink.emit("pull-sample")
-        self._new_frame = self.gst_to_opencv(sample)
+        if sample:
+            frame = self.gst_to_opencv(sample)
+            with self.condition:
+                self.latest_frame = frame
+                self.condition.notify()
         return Gst.FlowReturn.OK
 
+    def get_latest_frame_blocking(self):
+        """Μπλοκάρει αποδοτικά μέχρι να φτάσει νέο frame από το GStreamer."""
+        with self.condition:
+            while self.latest_frame is None and self.running:
+                self.condition.wait(timeout=0.1)
+
+            if not self.running:
+                return None
+
+            frame = self.latest_frame
+            self.latest_frame = None  # Consume frame: αποφυγή επανεπεξεργασίας
+            return frame
+
     def stop(self):
+        self.running = False
+        with self.condition:
+            self.condition.notify_all()
         if self.video_pipe:
             self.video_pipe.set_state(Gst.State.NULL)
 
@@ -187,7 +205,6 @@ def rotation_matrix_to_rpy(R):
 
 
 def rotation_matrix_to_quaternion(R):
-    """Μετατροπή 3x3 Rotation Matrix σε Quaternion (qx, qy, qz, qw)."""
     tr = np.trace(R)
     if tr > 0:
         S = np.sqrt(tr + 1.0) * 2.0
@@ -251,7 +268,6 @@ class BlueROVLocalizationNode(Node):
     def __init__(self):
         super().__init__("localization_node")
 
-        # Δημοσίευση ROS Parameters
         self.declare_parameter("udp_port", 5600)
         self.declare_parameter("world_frame_id", "world")
         self.port = self.get_parameter("udp_port").get_parameter_value().integer_value
@@ -263,59 +279,65 @@ class BlueROVLocalizationNode(Node):
         self.pose_pub = self.create_publisher(PoseStamped, "rov/pose", 10)
         self.human_pub = self.create_publisher(String, "rov/pose_human_readable", 10)
 
-        # Video stream & AprilTag detector
-        self.video = Video(port=self.port)
+        # Detector configuration
         self.detector = apriltag.Detector(
             families=TAG_FAMILY,
-            nthreads=4, # number of threads of CPU
-            quad_decimate=2.0, # down-sample factor for faster detection
-            quad_sigma=0.0, # no Gaussian blur for speed
-            refine_edges=0, # no edge refinement for speed
+            nthreads=4,
+            quad_decimate=2.0,
+            quad_sigma=0.0,
+            refine_edges=0,
         )
 
         self.get_logger().info(f"Connecting to UDP stream on port {self.port}...")
-        waited = 0
-        while not self.video.frame_available() and rclpy.ok():
-            waited += 1
-            time.sleep(0.05)
-        self.get_logger().info("Video stream connected successfully!")
+        self.video = Video(port=self.port)
 
-        # Timer loop (30 Hz)
-        self.timer = self.create_timer(1.0 / 30.0, self.process_frame)
+        # Worker thread
+        self.is_running = True
+        self.worker_thread = threading.Thread(target=self.processing_loop, daemon=True)
+        self.worker_thread.start()
+        self.get_logger().info("Localization worker thread started.")
 
-    def process_frame(self):
-        if not self.video.frame_available():
-            cv2.waitKey(1)
-            return
+    def processing_loop(self):
+        """Εκτελεί το pipeline μόλις φτάσει νέο frame από το GStreamer."""
+        first_frame = True
+        while rclpy.ok() and self.is_running:
+            frame = self.video.get_latest_frame_blocking()
+            if frame is None:
+                continue
 
-        frame = self.video.frame()
-        if frame is None:
-            return
-        frame = frame.copy()
+            if first_frame:
+                self.get_logger().info("Video stream connected! Processing started.")
+                first_frame = False
 
+            self.process_pipeline(frame)
+
+    def process_pipeline(self, frame):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         results = self.detector.detect(gray)
+
+        # Deduplication μέσω λεξικού
+        detected_tags_in_frame = {}
+        for r in results:
+            detected_tags_in_frame[r.tag_id] = r.corners
 
         all_obj_pts = []
         all_img_pts = []
         detected_known_ids = []
 
-        for r in results:
-            tag_id = r.tag_id
-            corners = r.corners.astype(int)
-
+        for tag_id, corners in detected_tags_in_frame.items():
+            corners_int = corners.astype(int)
             for i in range(4):
                 cv2.line(
                     frame,
-                    tuple(corners[i]),
-                    tuple(corners[(i + 1) % 4]),
+                    tuple(corners_int[i]),
+                    tuple(corners_int[(i + 1) % 4]),
                     (0, 255, 0),
                     2,
                 )
             cv2.putText(
                 frame,
                 f"ID:{tag_id}",
-                (corners[0][0], corners[0][1] - 8),
+                (corners_int[0][0], corners_int[0][1] - 8),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
                 (0, 255, 0),
@@ -324,7 +346,7 @@ class BlueROVLocalizationNode(Node):
 
             if tag_id in GLOBAL_TAG_CORNERS:
                 all_obj_pts.append(GLOBAL_TAG_CORNERS[tag_id])
-                all_img_pts.append(r.corners)
+                all_img_pts.append(corners)
                 detected_known_ids.append(tag_id)
 
         if len(detected_known_ids) > 0:
@@ -332,7 +354,7 @@ class BlueROVLocalizationNode(Node):
             img_pts = np.vstack(all_img_pts).astype(np.float64)
 
             if len(detected_known_ids) >= 2:
-                success, rvec, tvec, inliers = cv2.solvePnPRansac(
+                success, rvec, tvec, _ = cv2.solvePnPRansac(
                     obj_pts,
                     img_pts,
                     K,
@@ -446,11 +468,15 @@ class BlueROVLocalizationNode(Node):
 
         cv2.imshow("BlueROV2 Localization (Global Multi-Tag PnP)", frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):
-            self.get_logger().info("Exit key pressed.")
+            self.get_logger().info("Exit key 'q' pressed.")
+            self.is_running = False
             rclpy.shutdown()
 
     def destroy_node(self):
+        self.is_running = False
         self.video.stop()
+        if hasattr(self, "worker_thread") and self.worker_thread.is_alive():
+            self.worker_thread.join(timeout=0.5)
         cv2.destroyAllWindows()
         super().destroy_node()
 
