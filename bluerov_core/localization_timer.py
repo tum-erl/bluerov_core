@@ -6,6 +6,7 @@ Features:
 - Event-Driven Processing with dedicated worker thread (Condition variable)
 - Low-latency direct GRAY8 GStreamer pipeline (avdec_h264 for ARM/RPi CPU)
 - GStreamer H.264 parse-to-sample decode probe profiling
+- Adaptive Multi-ROI Tracking with Periodic Full Scan for new tag discovery
 - Dictionary-based AprilTag deduplication for robust PnP solving
 - Modular Pipeline Profiler with execution metrics & horizontal summary chart on exit
 - Clean thread join & shutdown cleanup
@@ -37,7 +38,6 @@ from std_msgs.msg import String
 # ==============================================================================
 class PipelineProfiler:
     """Καταγράφει χρόνους εκτέλεσης ανά στάδιο και παράγει δομημένο γράφημα
-
     διαχωρισμένο ανά Hardware Thread (Stream Rate, Thread A, Thread B).
     """
 
@@ -51,7 +51,6 @@ class PipelineProfiler:
 
     def time_block(self, stage_name):
         class _TimerContext:
-
             def __init__(self, profiler, name):
                 self.profiler = profiler
                 self.name = name
@@ -75,7 +74,6 @@ class PipelineProfiler:
                 return
             stage_data = {k: list(v) for k, v in self.stage_times.items()}
 
-        # 1. Διαχωρισμός σταδίων ανά αρχιτεκτονικό ρόλο / Thread
         stream_stages = ["0_inter_frame_interval"]
 
         thread_a_stages = [
@@ -89,12 +87,10 @@ class PipelineProfiler:
             for s in [
                 "1_apriltag_detect",
                 "2_solve_pnp_and_publish",
-                "3_gui_events",
             ]
             if s in stage_data
         ]
 
-        # Υπολογισμοί μετρικών
         avg_interval_ms = (
             np.mean(stage_data["0_inter_frame_interval"])
             if "0_inter_frame_interval" in stage_data
@@ -130,9 +126,7 @@ class PipelineProfiler:
             gridspec_kw={"height_ratios": [1, 1.3, 1.8]},
         )
 
-        # ----------------------------------------------------------------------
-        # PANEL 1: Stream Delivery Rate (Callback Triggers)
-        # ----------------------------------------------------------------------
+        # PANEL 1: Stream Delivery Rate
         ax0 = axes[0]
         ax0.barh(
             [0],
@@ -143,9 +137,7 @@ class PipelineProfiler:
             alpha=0.85,
         )
         ax0.set_yticks([0])
-        ax0.set_yticklabels(
-            ["Inter-Frame Arrival"], fontsize=10, fontweight="bold"
-        )
+        ax0.set_yticklabels(["Inter-Frame Arrival"], fontsize=10, fontweight="bold")
         ax0.set_xlabel("Χρόνος ανάμεσα σε διαδοχικά callbacks (ms)", fontsize=9.5)
         ax0.set_title(
             f"1. Inbound Video Stream (Συχνότητα εκτέλεσης Callback)\n"
@@ -167,9 +159,7 @@ class PipelineProfiler:
             color="#1b4f72",
         )
 
-        # ----------------------------------------------------------------------
-        # PANEL 2: Thread A (GStreamer C-Thread & Decode Pipeline)
-        # ----------------------------------------------------------------------
+        # PANEL 2: Thread A (GStreamer C-Thread)
         ax1 = axes[1]
         y_pos_a = np.arange(len(thread_a_stages))
         avg_a = [np.mean(stage_data[s]) for s in thread_a_stages]
@@ -209,13 +199,11 @@ class PipelineProfiler:
                 fontweight="bold",
             )
 
-        # ----------------------------------------------------------------------
-        # PANEL 3: Thread B (Python Worker Thread - Vision & Pose)
-        # ----------------------------------------------------------------------
+        # PANEL 3: Thread B (Python Worker Thread)
         ax2 = axes[2]
         y_pos_b = np.arange(len(thread_b_stages))
         avg_b = [np.mean(stage_data[s]) for s in thread_b_stages]
-        colors_b = ["#16a085", "#c0392b", "#27ae60", "#8e44ad"]
+        colors_b = ["#16a085", "#c0392b"]
 
         bars_b = ax2.barh(
             y_pos_b,
@@ -230,7 +218,7 @@ class PipelineProfiler:
         ax2.invert_yaxis()
         ax2.set_xlabel("Χρόνος εκτέλεσης στην Python (ms)", fontsize=9.5)
         ax2.set_title(
-            f"3. Thread B: Vision Pipeline (Dedicated Worker Thread)\n"
+            f"3. Thread B: Vision Pipeline (Dedicated Worker Thread - ROI Active)\n"
             f"Καθαρός Χρόνος Επεξεργασίας Worker: {thread_b_total_ms:.2f} ms  |  Μέγιστη Ικανότητα Worker: {worker_max_hz:.1f} Hz",
             fontsize=11,
             fontweight="bold",
@@ -258,7 +246,6 @@ class PipelineProfiler:
 
         plt.tight_layout()
 
-        # Terminal Text Report
         print("\n" + "=" * 65)
         print(" ARCHITECTURAL PROFILING REPORT (MULTI-THREAD BREAKDOWN)")
         print("=" * 65)
@@ -282,6 +269,7 @@ class PipelineProfiler:
         print("=" * 65 + "\n")
 
         plt.show()
+
 
 # ==============================================================================
 # 1. GLOBAL CONFIGURATION & TAG MAP
@@ -341,10 +329,6 @@ class Video:
         self.last_frame_arrival_time = None
         self.current_h264_packet_time = None
 
-        # Βελτιστοποιημένα στάδια για Raspberry Pi CPU:
-        # - rtpjitterbuffer latency=0 για μηδενικό buffering καθυστέρησης
-        # - avdec_h264 με NEON acceleration αντί του openh264dec
-        # - format=GRAY8 για απευθείας απομόνωση του Y plane χωρίς υπολογιστικό κόστος
         self.video_source = (
             f"udpsrc port={self.port} "
             f'caps="application/x-rtp, media=video, clock-rate=90000, encoding-name=H264, payload=96" ! '
@@ -373,7 +357,6 @@ class Video:
         self.video_pipe = Gst.parse_launch(command)
         self.video_sink = self.video_pipe.get_by_name("appsink0")
 
-        # Probe στο src pad του h264parse για μέτρηση decode latency
         parser = self.video_pipe.get_by_name("my_parser")
         if parser and self.profiler:
             src_pad = parser.get_static_pad("src")
@@ -399,7 +382,6 @@ class Video:
             return None
 
         try:
-            # Δημιουργία 2D πίνακα (H, W) και άμεση αντιγραφή ώστε να αποδεσμευτεί το GstBuffer
             frame = np.ndarray((h, w), buffer=map_info.data, dtype=np.uint8).copy()
             return frame
         finally:
@@ -453,7 +435,7 @@ class Video:
                 return None
 
             frame = self.latest_frame
-            self.latest_frame = None  # Consume frame
+            self.latest_frame = None
             return frame
 
     def stop(self):
@@ -465,7 +447,7 @@ class Video:
 
 
 # ==============================================================================
-# 4. HELPER FUNCTIONS: ROTATIONS & 3D CORNER GENERATION
+# 4. ROTATIONS & 3D CORNER GENERATION
 # ==============================================================================
 def rpy_to_rotation_matrix(rpy_deg):
     r_rad, p_rad, y_rad = np.radians(rpy_deg)
@@ -559,7 +541,40 @@ GLOBAL_TAG_CORNERS = build_global_tag_corners(TAG_MAP, TAG_SIZE_METERS)
 
 
 # ==============================================================================
-# 5. ROS 2 NODE CLASS
+# 5. ROI TRACKING DATA STRUCTURE
+# ==============================================================================
+class TrackedTag:
+    """Διατηρεί κατάσταση εντοπισμού και υπολογίζει adaptive ROI γύρω από το tag."""
+
+    def __init__(self, tag_id, corners):
+        self.tag_id = tag_id
+        self.lost_frames = 0
+        self.update(corners)
+
+    def update(self, corners):
+        self.corners = corners.copy()
+        self.lost_frames = 0
+        xs = corners[:, 0]
+        ys = corners[:, 1]
+        self.x_min, self.x_max = np.min(xs), np.max(xs)
+        self.y_min, self.y_max = np.min(ys), np.max(ys)
+
+    def get_roi_crop(self, frame_w, frame_h, margin_factor=2.0, min_size=80):
+        cx = (self.x_min + self.x_max) / 2.0
+        cy = (self.y_min + self.y_max) / 2.0
+
+        w = max(self.x_max - self.x_min, min_size) * margin_factor
+        h = max(self.y_max - self.y_min, min_size) * margin_factor
+
+        x1 = max(0, int(cx - w / 2.0))
+        y1 = max(0, int(cy - h / 2.0))
+        x2 = min(frame_w, int(cx + w / 2.0))
+        y2 = min(frame_h, int(cy + h / 2.0))
+        return x1, y1, x2, y2
+
+
+# ==============================================================================
+# 6. ROS 2 NODE CLASS
 # ==============================================================================
 class BlueROVLocalizationNode(Node):
 
@@ -573,30 +588,32 @@ class BlueROVLocalizationNode(Node):
             self.get_parameter("world_frame_id").get_parameter_value().string_value
         )
 
-        # Publishers
         self.pose_pub = self.create_publisher(PoseStamped, "rov/pose", 10)
         self.human_pub = self.create_publisher(String, "rov/pose_human_readable", 10)
 
-        # Profiler instance
         self.profiler = PipelineProfiler()
 
-        # Detector configuration
         self.detector = apriltag.Detector(
             families=TAG_FAMILY,
             nthreads=4,
-            quad_decimate=2.0, # Downsample factor for faster detection (1.0 = no downsampling)
-            quad_sigma=0.0, # Gaussian blur applied to the image (0.0 = no blur)
-            refine_edges=0, # Whether to refine the edges of detected tags (0 = no refinement, 1 = refine)
+            quad_decimate=2.0,
+            quad_sigma=0.0,
+            refine_edges=0,
         )
+
+        # ROI Tracking παραμέτροι
+        self.tracked_tags = {}
+        self.frame_count = 0
+        self.FULL_SCAN_INTERVAL = 30  # Πλήρες scan ανά 30 frames (ή όταν δεν υπάρχουν tags)
+        self.MAX_LOST_FRAMES = 5      # Διαγραφή από το tracking μετά από 5 χαμένα frames
 
         self.get_logger().info(f"Connecting to UDP stream on port {self.port}...")
         self.video = Video(port=self.port, profiler=self.profiler)
 
-        # Worker thread
         self.is_running = True
         self.worker_thread = threading.Thread(target=self.processing_loop, daemon=True)
         self.worker_thread.start()
-        self.get_logger().info("Localization worker thread started.")
+        self.get_logger().info("Localization worker thread started (Adaptive ROI enabled).")
 
     def processing_loop(self):
         """Εκτελεί το pipeline μόλις φτάσει νέο frame από το GStreamer."""
@@ -613,17 +630,55 @@ class BlueROVLocalizationNode(Node):
             self.process_pipeline(frame)
 
     def process_pipeline(self, frame):
-        
+        self.frame_count += 1
         gray = frame
 
-        # 1. APRILTAG DETECT
+        # 1. APRILTAG DETECT (ADAPTIVE ROI TRACKING)
         with self.profiler.time_block("1_apriltag_detect"):
-            results = self.detector.detect(gray)
             detected_tags_in_frame = {}
-            for r in results:
-                detected_tags_in_frame[r.tag_id] = r.corners
+            run_full_scan = (len(self.tracked_tags) == 0) or (
+                self.frame_count % self.FULL_SCAN_INTERVAL == 0
+            )
 
-        # 3. SOLVE PNP & PUBLISH
+            if run_full_scan:
+                results = self.detector.detect(gray)
+                for r in results:
+                    detected_tags_in_frame[r.tag_id] = r.corners
+            else:
+                for tag_id, track in list(self.tracked_tags.items()):
+                    x1, y1, x2, y2 = track.get_roi_crop(FRAME_WIDTH, FRAME_HEIGHT)
+                    roi_gray = gray[y1:y2, x1:x2]
+
+                    roi_results = self.detector.detect(roi_gray)
+                    matched = False
+                    for r in roi_results:
+                        if r.tag_id == tag_id:
+                            # Μεταφορά 2D συντεταγμένων πίσω στο πλήρες frame
+                            global_corners = r.corners + np.array([x1, y1])
+                            detected_tags_in_frame[tag_id] = global_corners
+                            matched = True
+                            break
+
+                    if not matched:
+                        track.lost_frames += 1
+
+            # Ενημέρωση/Δημιουργία trackers
+            for tag_id, corners in detected_tags_in_frame.items():
+                if tag_id in self.tracked_tags:
+                    self.tracked_tags[tag_id].update(corners)
+                else:
+                    self.tracked_tags[tag_id] = TrackedTag(tag_id, corners)
+
+            # Καθαρισμός tags που χάθηκαν
+            tags_to_remove = [
+                tag_id
+                for tag_id, track in self.tracked_tags.items()
+                if track.lost_frames > self.MAX_LOST_FRAMES
+            ]
+            for tag_id in tags_to_remove:
+                del self.tracked_tags[tag_id]
+
+        # 2. SOLVE PNP & PUBLISH
         with self.profiler.time_block("2_solve_pnp_and_publish"):
             all_obj_pts = []
             all_img_pts = []
@@ -667,7 +722,6 @@ class BlueROVLocalizationNode(Node):
 
                     stamp = self.get_clock().now().to_msg()
 
-                    # Publisher 1: PoseStamped (Quaternions)
                     pose_msg = PoseStamped()
                     pose_msg.header.stamp = stamp
                     pose_msg.header.frame_id = self.world_frame
@@ -680,7 +734,6 @@ class BlueROVLocalizationNode(Node):
                     pose_msg.pose.orientation.w = float(qw)
                     self.pose_pub.publish(pose_msg)
 
-                    # Publisher 2: Human-readable String format
                     human_msg = String()
                     human_msg.data = (
                         f"Position [m]: X={rov_x:+.3f}, Y={rov_y:+.3f}, Z={rov_z:+.3f} | "
@@ -698,7 +751,7 @@ class BlueROVLocalizationNode(Node):
 
 
 # ==============================================================================
-# 6. MAIN EXECUTION
+# 7. MAIN EXECUTION
 # ==============================================================================
 def main(args=None):
     rclpy.init(args=args)
