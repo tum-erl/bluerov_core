@@ -4,7 +4,7 @@ BlueROV2 AprilTag Camera Localization ROS 2 Node (Jazzy)
 Node: rov_localization_node
 Features:
 - Event-Driven Processing with dedicated worker thread (Condition variable)
-- Modular GStreamer pipeline configuration with zero-latency drop (max-buffers=1)
+- Low-latency direct GRAY8 GStreamer pipeline (avdec_h264 for ARM/RPi CPU)
 - GStreamer H.264 parse-to-sample decode probe profiling
 - Dictionary-based AprilTag deduplication for robust PnP solving
 - Modular Pipeline Profiler with execution metrics & horizontal summary chart on exit
@@ -33,10 +33,13 @@ from std_msgs.msg import String
 
 
 # ==============================================================================
-# 0. PROFILER CLASS
+# 0. MODULAR MULTI-THREAD PIPELINE PROFILER
 # ==============================================================================
 class PipelineProfiler:
-    """Καταγράφει χρόνους εκτέλεσης ανά block και παράγει συγκεντρωτικό γράφημα."""
+    """Καταγράφει χρόνους εκτέλεσης ανά στάδιο και παράγει δομημένο γράφημα
+
+    διαχωρισμένο ανά Hardware Thread (Stream Rate, Thread A, Thread B).
+    """
 
     def __init__(self):
         self.stage_times = defaultdict(list)
@@ -48,6 +51,7 @@ class PipelineProfiler:
 
     def time_block(self, stage_name):
         class _TimerContext:
+
             def __init__(self, profiler, name):
                 self.profiler = profiler
                 self.name = name
@@ -69,68 +73,183 @@ class PipelineProfiler:
             if not self.stage_times:
                 print("[Profiler] Δεν καταγράφηκαν δεδομένα χρονισμού.")
                 return
-            stage_keys = list(self.stage_times.keys())
             stage_data = {k: list(v) for k, v in self.stage_times.items()}
 
-        stages = stage_keys
-        avg_times = [np.mean(stage_data[s]) for s in stages]
+        # 1. Διαχωρισμός σταδίων ανά αρχιτεκτονικό ρόλο / Thread
+        stream_stages = ["0_inter_frame_interval"]
 
-        compute_stages = [s for s in stages if "inter_frame" not in s]
-        compute_avg_ms = sum(np.mean(stage_data[s]) for s in compute_stages)
-        max_possible_fps = 1000.0 / compute_avg_ms if compute_avg_ms > 0 else 0.0
+        thread_a_stages = [
+            s
+            for s in ["0_gst_h264_decode", "0_gst_buffer_to_numpy"]
+            if s in stage_data
+        ]
 
-        if "0_inter_frame_interval" in stage_data:
-            avg_interval_ms = np.mean(stage_data["0_inter_frame_interval"])
-            actual_camera_fps = 1000.0 / avg_interval_ms if avg_interval_ms > 0 else 0.0
-        else:
-            actual_camera_fps = max_possible_fps
+        thread_b_stages = [
+            s
+            for s in [
+                "1_apriltag_detect",
+                "2_solve_pnp_and_publish",
+                "3_gui_events",
+            ]
+            if s in stage_data
+        ]
+
+        # Υπολογισμοί μετρικών
+        avg_interval_ms = (
+            np.mean(stage_data["0_inter_frame_interval"])
+            if "0_inter_frame_interval" in stage_data
+            else 0.0
+        )
+        stream_fps = (
+            1000.0 / avg_interval_ms
+            if avg_interval_ms > 0
+            else 0.0
+        )
+
+        thread_a_total_ms = sum(
+            np.mean(stage_data[s]) for s in thread_a_stages
+        )
+        thread_b_total_ms = sum(
+            np.mean(stage_data[s]) for s in thread_b_stages
+        )
+        worker_max_hz = (
+            1000.0 / thread_b_total_ms
+            if thread_b_total_ms > 0
+            else 0.0
+        )
 
         plt.style.use(
             "seaborn-v0_8-whitegrid"
             if "seaborn-v0_8-whitegrid" in plt.style.available
             else "default"
         )
-        fig, ax = plt.subplots(figsize=(11, 6))
+        fig, axes = plt.subplots(
+            3,
+            1,
+            figsize=(11, 8.5),
+            gridspec_kw={"height_ratios": [1, 1.3, 1.8]},
+        )
 
-        colors = ["#c0392b", "#d35400", "#2980b9", "#8e44ad", "#16a085", "#27ae60", "#7f8c8d"]
-        bar_colors = [colors[i % len(colors)] for i in range(len(stages))]
-
-        y_positions = np.arange(len(stages))
-        bars = ax.barh(
-            y_positions,
-            avg_times,
-            color=bar_colors,
+        # ----------------------------------------------------------------------
+        # PANEL 1: Stream Delivery Rate (Callback Triggers)
+        # ----------------------------------------------------------------------
+        ax0 = axes[0]
+        ax0.barh(
+            [0],
+            [avg_interval_ms],
+            color="#2980b9",
             edgecolor="black",
+            height=0.45,
             alpha=0.85,
-            height=0.55,
         )
-
-        ax.set_yticks(y_positions)
-        ax.set_yticklabels(stages, fontsize=9.5, fontweight="bold")
-        ax.invert_yaxis()
-        ax.set_xlabel("Μέσος Χρόνος (ms)", fontsize=11, fontweight="bold")
-        ax.set_title(
-            f"Pipeline Profiling (Full Frame - Event-Driven Worker)\n"
-            f"Συνολικό Latency Επεξεργασίας: {compute_avg_ms:.2f} ms | Ρυθμός Stream: ~{actual_camera_fps:.1f} FPS",
-            fontsize=12,
+        ax0.set_yticks([0])
+        ax0.set_yticklabels(
+            ["Inter-Frame Arrival"], fontsize=10, fontweight="bold"
+        )
+        ax0.set_xlabel("Χρόνος ανάμεσα σε διαδοχικά callbacks (ms)", fontsize=9.5)
+        ax0.set_title(
+            f"1. Inbound Video Stream (Συχνότητα εκτέλεσης Callback)\n"
+            f"Μέσος ρυθμός: {avg_interval_ms:.2f} ms ανά frame  |  Πραγματικός Ρυθμός Κάμερας: ~{stream_fps:.1f} FPS",
+            fontsize=11,
             fontweight="bold",
-            pad=14,
+            loc="left",
+            pad=8,
+        )
+        ax0.set_xlim(0, max(avg_interval_ms * 1.35, 40))
+        ax0.text(
+            avg_interval_ms + 1.0,
+            0,
+            f"{avg_interval_ms:.2f} ms (~{stream_fps:.1f} FPS)",
+            va="center",
+            ha="left",
+            fontsize=10,
+            fontweight="bold",
+            color="#1b4f72",
         )
 
-        max_val = max(avg_times) if avg_times else 1.0
-        ax.set_xlim(0, max_val * 1.30)
+        # ----------------------------------------------------------------------
+        # PANEL 2: Thread A (GStreamer C-Thread & Decode Pipeline)
+        # ----------------------------------------------------------------------
+        ax1 = axes[1]
+        y_pos_a = np.arange(len(thread_a_stages))
+        avg_a = [np.mean(stage_data[s]) for s in thread_a_stages]
+        colors_a = ["#e67e22", "#d35400"]
 
-        for bar, avg_t, stage_name in zip(bars, avg_times, stages):
-            if "inter_frame" in stage_name:
-                label_txt = f"{avg_t:.2f} ms (~{actual_camera_fps:.1f} FPS stream)"
-            else:
-                pct = (avg_t / compute_avg_ms) * 100.0 if compute_avg_ms > 0 else 0
-                label_txt = f"{avg_t:.2f} ms ({pct:.1f}%)"
+        bars_a = ax1.barh(
+            y_pos_a,
+            avg_a,
+            color=colors_a[: len(thread_a_stages)],
+            edgecolor="black",
+            height=0.5,
+            alpha=0.85,
+        )
+        ax1.set_yticks(y_pos_a)
+        ax1.set_yticklabels(thread_a_stages, fontsize=10, fontweight="bold")
+        ax1.invert_yaxis()
+        ax1.set_xlabel("Χρόνος εκτέλεσης στη C (ms)", fontsize=9.5)
+        ax1.set_title(
+            f"2. Thread A: Ingestion & Decode (GStreamer C-Thread)\n"
+            f"Συνολικό Overhead στο Callback: {thread_a_total_ms:.2f} ms (Παράλληλο με το Worker Thread)",
+            fontsize=11,
+            fontweight="bold",
+            loc="left",
+            pad=8,
+        )
+        max_a = max(avg_a) if avg_a else 10.0
+        ax1.set_xlim(0, max_a * 1.35)
 
-            ax.text(
-                bar.get_width() + (max_val * 0.015),
+        for bar, avg_t in zip(bars_a, avg_a):
+            ax1.text(
+                bar.get_width() + (max_a * 0.02),
                 bar.get_y() + bar.get_height() / 2,
-                label_txt,
+                f"{avg_t:.2f} ms",
+                va="center",
+                ha="left",
+                fontsize=9.5,
+                fontweight="bold",
+            )
+
+        # ----------------------------------------------------------------------
+        # PANEL 3: Thread B (Python Worker Thread - Vision & Pose)
+        # ----------------------------------------------------------------------
+        ax2 = axes[2]
+        y_pos_b = np.arange(len(thread_b_stages))
+        avg_b = [np.mean(stage_data[s]) for s in thread_b_stages]
+        colors_b = ["#16a085", "#c0392b", "#27ae60", "#8e44ad"]
+
+        bars_b = ax2.barh(
+            y_pos_b,
+            avg_b,
+            color=colors_b[: len(thread_b_stages)],
+            edgecolor="black",
+            height=0.5,
+            alpha=0.85,
+        )
+        ax2.set_yticks(y_pos_b)
+        ax2.set_yticklabels(thread_b_stages, fontsize=10, fontweight="bold")
+        ax2.invert_yaxis()
+        ax2.set_xlabel("Χρόνος εκτέλεσης στην Python (ms)", fontsize=9.5)
+        ax2.set_title(
+            f"3. Thread B: Vision Pipeline (Dedicated Worker Thread)\n"
+            f"Καθαρός Χρόνος Επεξεργασίας Worker: {thread_b_total_ms:.2f} ms  |  Μέγιστη Ικανότητα Worker: {worker_max_hz:.1f} Hz",
+            fontsize=11,
+            fontweight="bold",
+            loc="left",
+            pad=8,
+        )
+        max_b = max(avg_b) if avg_b else 10.0
+        ax2.set_xlim(0, max_b * 1.35)
+
+        for bar, avg_t in zip(bars_b, avg_b):
+            pct = (
+                (avg_t / thread_b_total_ms) * 100.0
+                if thread_b_total_ms > 0
+                else 0
+            )
+            ax2.text(
+                bar.get_width() + (max_b * 0.02),
+                bar.get_y() + bar.get_height() / 2,
+                f"{avg_t:.2f} ms ({pct:.1f}%)",
                 va="center",
                 ha="left",
                 fontsize=9.5,
@@ -138,23 +257,31 @@ class PipelineProfiler:
             )
 
         plt.tight_layout()
+
+        # Terminal Text Report
         print("\n" + "=" * 65)
-        print(" PIPELINE & GSTREAMER PROFILING REPORT")
+        print(" ARCHITECTURAL PROFILING REPORT (MULTI-THREAD BREAKDOWN)")
         print("=" * 65)
-        for s, avg_t in zip(stages, avg_times):
-            if "inter_frame" in s:
-                print(f" * {s:<28}: {avg_t:6.2f} ms (Camera Frame Rate: ~{actual_camera_fps:.1f} FPS)")
-            else:
-                pct = (avg_t / compute_avg_ms) * 100.0 if compute_avg_ms > 0 else 0
-                print(f" - {s:<28}: {avg_t:6.2f} ms ({pct:5.1f}%)")
+        print(f" [STREAM ARRIVAL]")
+        print(
+            f"  * 0_inter_frame_interval     : {avg_interval_ms:6.2f} ms (Camera Rate: ~{stream_fps:.1f} FPS)"
+        )
+        print(f"\n [THREAD A: GStreamer & Ingestion (C-Level)]")
+        for s in thread_a_stages:
+            print(f"  - {s:<27}: {np.mean(stage_data[s]):6.2f} ms")
+        print(f"  > Total Ingestion Latency    : {thread_a_total_ms:6.2f} ms")
+        print(f"\n [THREAD B: Vision & PnP Solver (Worker Thread)]")
+        for s in thread_b_stages:
+            avg_t = np.mean(stage_data[s])
+            pct = (avg_t / thread_b_total_ms) * 100.0 if thread_b_total_ms > 0 else 0
+            print(f"  - {s:<27}: {avg_t:6.2f} ms ({pct:5.1f}%)")
+        print(f"  > Total Worker Processing    : {thread_b_total_ms:6.2f} ms")
         print("-" * 65)
-        print(f" Total Per-Frame Latency     : {compute_avg_ms:6.2f} ms")
-        print(f" Max Theoretical Compute Rate: {max_possible_fps:6.1f} Hz")
-        print(f" Actual Inbound Camera Rate  : {actual_camera_fps:6.1f} FPS")
+        print(f" Real Inbound Camera Rate      : {stream_fps:6.1f} FPS")
+        print(f" Worker Max Throughput Limit   : {worker_max_hz:6.1f} Hz")
         print("=" * 65 + "\n")
 
         plt.show()
-
 
 # ==============================================================================
 # 1. GLOBAL CONFIGURATION & TAG MAP
@@ -196,10 +323,10 @@ CAMERA_TO_BODY_OFFSET = np.array([[0.0], [0.0], [-0.00]])
 
 
 # ==============================================================================
-# 3. BLUEROV2 VIDEO CAPTURE CLASS (GSTREAMER PROFILED)
+# 3. BLUEROV2 VIDEO CAPTURE CLASS (DIRECT GRAY8 & RPI OPTIMIZED)
 # ==============================================================================
 class Video:
-    """BlueROV video capture class με modular GStreamer pipeline, drop=true και profiling probes."""
+    """BlueROV video capture class με βελτιστοποιημένο GRAY8 GStreamer pipeline και profiling."""
 
     def __init__(self, port=5600, profiler=None):
         Gst.init(None)
@@ -214,15 +341,17 @@ class Video:
         self.last_frame_arrival_time = None
         self.current_h264_packet_time = None
 
-        self.video_source = f"udpsrc port={self.port}"
-        self.video_codec = (
-            "! application/x-rtp, payload=96 ! rtph264depay ! h264parse name=my_parser !"
-            " openh264dec"
+        # Βελτιστοποιημένα στάδια για Raspberry Pi CPU:
+        # - rtpjitterbuffer latency=0 για μηδενικό buffering καθυστέρησης
+        # - avdec_h264 με NEON acceleration αντί του openh264dec
+        # - format=GRAY8 για απευθείας απομόνωση του Y plane χωρίς υπολογιστικό κόστος
+        self.video_source = (
+            f"udpsrc port={self.port} "
+            f'caps="application/x-rtp, media=video, clock-rate=90000, encoding-name=H264, payload=96" ! '
+            f"rtpjitterbuffer latency=0 drop-on-latency=true"
         )
-        self.video_decode = (
-            "! decodebin ! videoconvert ! video/x-raw,format=(string)BGR !"
-            " videoconvert"
-        )
+        self.video_codec = "! rtph264depay ! h264parse name=my_parser ! avdec_h264 max-threads=2"
+        self.video_decode = "! videoconvert ! video/x-raw, format=GRAY8"
         self.video_sink_conf = (
             "! appsink name=appsink0 emit-signals=true sync=false max-buffers=1 drop=true"
         )
@@ -235,8 +364,8 @@ class Video:
     def start_gst(self, config=None):
         if not config:
             config = [
-                "videotestsrc ! decodebin",
-                "! videoconvert ! video/x-raw,format=(string)BGR ! videoconvert",
+                "videotestsrc",
+                "! videoconvert ! video/x-raw, format=GRAY8",
                 "! appsink name=appsink0",
             ]
 
@@ -259,18 +388,22 @@ class Video:
 
     @staticmethod
     def gst_to_opencv(sample):
+        """Εξάγει απευθείας 2D uint8 NumPy array (H, W) για Grayscale επεξεργασία."""
         buf = sample.get_buffer()
         caps_structure = sample.get_caps().get_structure(0)
-        array = np.ndarray(
-            (
-                caps_structure.get_value("height"),
-                caps_structure.get_value("width"),
-                3,
-            ),
-            buffer=buf.extract_dup(0, buf.get_size()),
-            dtype=np.uint8,
-        )
-        return array
+        h = caps_structure.get_value("height")
+        w = caps_structure.get_value("width")
+
+        success, map_info = buf.map(Gst.MapFlags.READ)
+        if not success:
+            return None
+
+        try:
+            # Δημιουργία 2D πίνακα (H, W) και άμεση αντιγραφή ώστε να αποδεσμευτεί το GstBuffer
+            frame = np.ndarray((h, w), buffer=map_info.data, dtype=np.uint8).copy()
+            return frame
+        finally:
+            buf.unmap(map_info)
 
     def run(self):
         self.start_gst([
@@ -451,9 +584,9 @@ class BlueROVLocalizationNode(Node):
         self.detector = apriltag.Detector(
             families=TAG_FAMILY,
             nthreads=4,
-            quad_decimate=2.0,
-            quad_sigma=0.0,
-            refine_edges=0,
+            quad_decimate=2.0, # Downsample factor for faster detection (1.0 = no downsampling)
+            quad_sigma=0.0, # Gaussian blur applied to the image (0.0 = no blur)
+            refine_edges=0, # Whether to refine the edges of detected tags (0 = no refinement, 1 = refine)
         )
 
         self.get_logger().info(f"Connecting to UDP stream on port {self.port}...")
@@ -480,43 +613,23 @@ class BlueROVLocalizationNode(Node):
             self.process_pipeline(frame)
 
     def process_pipeline(self, frame):
-        # 1. PREPROCESS
-        with self.profiler.time_block("1_preprocess"):
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        gray = frame
 
-        # 2. APRILTAG DETECT
-        with self.profiler.time_block("2_apriltag_detect"):
+        # 1. APRILTAG DETECT
+        with self.profiler.time_block("1_apriltag_detect"):
             results = self.detector.detect(gray)
             detected_tags_in_frame = {}
             for r in results:
                 detected_tags_in_frame[r.tag_id] = r.corners
 
         # 3. SOLVE PNP & PUBLISH
-        with self.profiler.time_block("3_solve_pnp_and_publish"):
+        with self.profiler.time_block("2_solve_pnp_and_publish"):
             all_obj_pts = []
             all_img_pts = []
             detected_known_ids = []
 
             for tag_id, corners in detected_tags_in_frame.items():
-                corners_int = corners.astype(int)
-                for i in range(4):
-                    cv2.line(
-                        frame,
-                        tuple(corners_int[i]),
-                        tuple(corners_int[(i + 1) % 4]),
-                        (0, 255, 0),
-                        2,
-                    )
-                cv2.putText(
-                    frame,
-                    f"ID:{tag_id}",
-                    (corners_int[0][0], corners_int[0][1] - 8),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 255, 0),
-                    2,
-                )
-
                 if tag_id in GLOBAL_TAG_CORNERS:
                     all_obj_pts.append(GLOBAL_TAG_CORNERS[tag_id])
                     all_img_pts.append(corners)
@@ -574,74 +687,6 @@ class BlueROVLocalizationNode(Node):
                         f"Orientation [deg]: Roll={rov_roll:+.1f}, Pitch={rov_pitch:+.1f}, Yaw={rov_yaw:+.1f}"
                     )
                     self.human_pub.publish(human_msg)
-
-                    status_text = (
-                        f"Tags used ({len(detected_known_ids)}): {detected_known_ids}"
-                    )
-                    pos_text = (
-                        f"ROV Pos (m)  : X={rov_x:+.2f}, Y={rov_y:+.2f}, Z={rov_z:+.2f}"
-                    )
-                    rot_text = (
-                        f"ROV Ori (deg): R={rov_roll:+.0f}, P={rov_pitch:+.0f},"
-                        f" Y={rov_yaw:+.0f}"
-                    )
-
-            #         cv2.putText(
-            #             frame,
-            #             status_text,
-            #             (30, 40),
-            #             cv2.FONT_HERSHEY_SIMPLEX,
-            #             0.7,
-            #             (0, 255, 255),
-            #             2,
-            #         )
-            #         cv2.putText(
-            #             frame,
-            #             pos_text,
-            #             (30, 75),
-            #             cv2.FONT_HERSHEY_SIMPLEX,
-            #             0.7,
-            #             (0, 255, 0),
-            #             2,
-            #         )
-            #         cv2.putText(
-            #             frame,
-            #             rot_text,
-            #             (30, 110),
-            #             cv2.FONT_HERSHEY_SIMPLEX,
-            #             0.7,
-            #             (0, 255, 0),
-            #             2,
-            #         )
-            #     else:
-            #         cv2.putText(
-            #             frame,
-            #             "PnP Solver Failed",
-            #             (30, 40),
-            #             cv2.FONT_HERSHEY_SIMPLEX,
-            #             0.7,
-            #             (0, 0, 255),
-            #             2,
-            #         )
-            # else:
-            #     cv2.putText(
-            #         frame,
-            #         "No known tags in view",
-            #         (30, 40),
-            #         cv2.FONT_HERSHEY_SIMPLEX,
-            #         0.7,
-            #         (0, 0, 255),
-            #         2,
-            #     )
-
-            # cv2.imshow("BlueROV2 Localization (Global Multi-Tag PnP)", frame)
-
-        # 4. GUI EVENTS & EXIT HANDLING
-        with self.profiler.time_block("4_gui_events"):
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                self.get_logger().info("Exit key 'q' pressed.")
-                self.is_running = False
-                rclpy.shutdown()
 
     def destroy_node(self):
         self.is_running = False

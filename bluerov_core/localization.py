@@ -67,29 +67,35 @@ CAMERA_TO_BODY_OFFSET = np.array([[0.0], [0.0], [-0.00]])
 
 
 # ==============================================================================
-# 3. BLUEROV2 VIDEO CAPTURE CLASS (GSTREAMER)
+# 3. BLUEROV2 VIDEO CAPTURE CLASS (DIRECT GRAY8 & RPI OPTIMIZED)
 # ==============================================================================
 class Video:
-    """BlueROV video capture class using GStreamer appsink."""
+    """BlueROV video capture class με βελτιστοποιημένο GRAY8 GStreamer pipeline και profiling."""
 
-    def __init__(self, port=5600):
+    def __init__(self, port=5600, profiler=None):
         Gst.init(None)
 
         self.port = port
+        self.profiler = profiler
+
         self.latest_frame = None
         self.running = True
-
         self.condition = threading.Condition()
 
-        self.video_source = f"udpsrc port={self.port}"
-        self.video_codec = (
-            "! application/x-rtp, payload=96 ! rtph264depay ! h264parse !"
-            " openh264dec"
+        self.last_frame_arrival_time = None
+        self.current_h264_packet_time = None
+
+        # Βελτιστοποιημένα στάδια για Raspberry Pi CPU:
+        # - rtpjitterbuffer latency=0 για μηδενικό buffering καθυστέρησης
+        # - avdec_h264 με NEON acceleration αντί του openh264dec
+        # - format=GRAY8 για απευθείας απομόνωση του Y plane χωρίς υπολογιστικό κόστος
+        self.video_source = (
+            f"udpsrc port={self.port} "
+            f'caps="application/x-rtp, media=video, clock-rate=90000, encoding-name=H264, payload=96" ! '
+            f"rtpjitterbuffer latency=0 drop-on-latency=true"
         )
-        self.video_decode = (
-            "! decodebin ! videoconvert ! video/x-raw,format=(string)BGR !"
-            " videoconvert"
-        )
+        self.video_codec = "! rtph264depay ! h264parse name=my_parser ! avdec_h264 max-threads=2"
+        self.video_decode = "! videoconvert ! video/x-raw, format=GRAY8"
         self.video_sink_conf = (
             "! appsink name=appsink0 emit-signals=true sync=false max-buffers=1 drop=true"
         )
@@ -102,30 +108,46 @@ class Video:
     def start_gst(self, config=None):
         if not config:
             config = [
-                "videotestsrc ! decodebin",
-                "! videoconvert ! video/x-raw,format=(string)BGR ! videoconvert",
+                "videotestsrc",
+                "! videoconvert ! video/x-raw, format=GRAY8",
                 "! appsink name=appsink0",
             ]
 
         command = " ".join(config)
         self.video_pipe = Gst.parse_launch(command)
-        self.video_pipe.set_state(Gst.State.PLAYING)
         self.video_sink = self.video_pipe.get_by_name("appsink0")
+
+        # Probe στο src pad του h264parse για μέτρηση decode latency
+        parser = self.video_pipe.get_by_name("my_parser")
+        if parser and self.profiler:
+            src_pad = parser.get_static_pad("src")
+            if src_pad:
+                src_pad.add_probe(Gst.PadProbeType.BUFFER, self._on_h264_buffer_in)
+
+        self.video_pipe.set_state(Gst.State.PLAYING)
+
+    def _on_h264_buffer_in(self, pad, info):
+        self.current_h264_packet_time = time.perf_counter()
+        return Gst.PadProbeReturn.OK
 
     @staticmethod
     def gst_to_opencv(sample):
+        """Εξάγει απευθείας 2D uint8 NumPy array (H, W) για Grayscale επεξεργασία."""
         buf = sample.get_buffer()
         caps_structure = sample.get_caps().get_structure(0)
-        array = np.ndarray(
-            (
-                caps_structure.get_value("height"),
-                caps_structure.get_value("width"),
-                3,
-            ),
-            buffer=buf.extract_dup(0, buf.get_size()),
-            dtype=np.uint8,
-        )
-        return array
+        h = caps_structure.get_value("height")
+        w = caps_structure.get_value("width")
+
+        success, map_info = buf.map(Gst.MapFlags.READ)
+        if not success:
+            return None
+
+        try:
+            # Δημιουργία 2D πίνακα (H, W) και άμεση αντιγραφή ώστε να αποδεσμευτεί το GstBuffer
+            frame = np.ndarray((h, w), buffer=map_info.data, dtype=np.uint8).copy()
+            return frame
+        finally:
+            buf.unmap(map_info)
 
     def run(self):
         self.start_gst([
@@ -137,12 +159,32 @@ class Video:
         self.video_sink.connect("new-sample", self.callback)
 
     def callback(self, sink):
+        recv_time = time.perf_counter()
+
+        if self.profiler:
+            if self.last_frame_arrival_time is not None:
+                inter_frame_ms = (recv_time - self.last_frame_arrival_time) * 1000.0
+                self.profiler.add_timing("0_inter_frame_interval", inter_frame_ms)
+            self.last_frame_arrival_time = recv_time
+
+            if self.current_h264_packet_time is not None:
+                decode_ms = (recv_time - self.current_h264_packet_time) * 1000.0
+                self.profiler.add_timing("0_gst_h264_decode", decode_ms)
+
         sample = sink.emit("pull-sample")
         if sample:
-            frame = self.gst_to_opencv(sample)
+            if self.profiler:
+                t0 = time.perf_counter()
+                frame = self.gst_to_opencv(sample)
+                t_buf_ms = (time.perf_counter() - t0) * 1000.0
+                self.profiler.add_timing("0_gst_buffer_to_numpy", t_buf_ms)
+            else:
+                frame = self.gst_to_opencv(sample)
+
             with self.condition:
                 self.latest_frame = frame
                 self.condition.notify()
+
         return Gst.FlowReturn.OK
 
     def get_latest_frame_blocking(self):
@@ -155,7 +197,7 @@ class Video:
                 return None
 
             frame = self.latest_frame
-            self.latest_frame = None  # Consume frame: αποφυγή επανεπεξεργασίας
+            self.latest_frame = None  # Consume frame
             return frame
 
     def stop(self):
@@ -312,7 +354,7 @@ class BlueROVLocalizationNode(Node):
             self.process_pipeline(frame)
 
     def process_pipeline(self, frame):
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = frame  # Already GRAY8 from GStreamer pipeline
         results = self.detector.detect(gray)
 
         # Deduplication μέσω λεξικού
