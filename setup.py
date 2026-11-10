@@ -24,7 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'localization = bluerov_core.localization_timer:main'
+            'localization = bluerov_core.node_localization:main'
         ],
     },
 )

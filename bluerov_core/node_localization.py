@@ -32,23 +32,53 @@ from std_msgs.msg import String
 # ==============================================================================
 # 1. GLOBAL CONFIGURATION & TAG MAP
 # ==============================================================================
-REFERENCE_TAG_ID = 0  # Defines origin of coordinate system (0,0,0)
-TAG_SIZE_METERS = 0.06  # Tag black square side length in meters
+REFERENCE_TAG_ID = 2  # Defines origin of coordinate system (0,0,0)
 TAG_FAMILY = "tagStandard41h12"
 
+# Μεγέθη tags (σε μέτρα)
+SMALL_TAG_SIZE = 0.05
+BIG_TAG_SIZE = 0.125
+
 TAG_MAP = {
-    0: {
-        "pos": [0.0, 0.0, 0.0],
-        "rpy": [0.0, 0.0, 0.0],
+    3: {
+        "pos": [-0.30, -.13, 0.0], 
+        "rpy": [0.0, 270.0, 0.0],
+        "size": BIG_TAG_SIZE,
     },
     1: {
-        "pos": [0.21, 0.0, 0.0],
+        "pos": [0.264, -0.280, 0.0],
         "rpy": [0.0, 0.0, 0.0],
+        "size": BIG_TAG_SIZE,
     },
     2: {
-        "pos": [0.0, 0.40, 0.0],
+        "pos": [0.0, 0.0, 0.0],
         "rpy": [0.0, 0.0, 0.0],
+        "size": BIG_TAG_SIZE,
     },
+
+    1000: {
+        "pos": [-0.28, -0.575, 0.0],
+        "rpy": [0.0, 0.0, 0.0],
+        "size": SMALL_TAG_SIZE,
+    },
+
+    1001: {
+        "pos": [0.254, -0.575, 0.0],
+        "rpy": [0.0, 0.0, 0.0],
+        "size": SMALL_TAG_SIZE,
+    },
+
+    1002: {
+        "pos": [-0.235, 0.2, 0.0],
+        "rpy": [270.0, 180.0, 0.0],
+        "size": SMALL_TAG_SIZE,
+    },
+
+    1003: {
+        "pos": [0.285, -0.098, 0.0],
+        "rpy": [0.0, 90.0, 0.0],
+        "size": SMALL_TAG_SIZE,
+    }
 }
 
 # ==============================================================================
@@ -57,13 +87,19 @@ TAG_MAP = {
 FRAME_WIDTH = 1920
 FRAME_HEIGHT = 1080
 
-FX = 1200.0
-FY = 1200.0
-CX = FRAME_WIDTH / 2.0
-CY = FRAME_HEIGHT / 2.0
+FX = 1031.7610
+FY = 1031.2645
+CX = 958.9953
+CY = 594.2563
 
-K = np.array([[FX, 0.0, CX], [0.0, FY, CY], [0.0, 0.0, 1.0]], dtype=np.float64)
-D = np.zeros(5, dtype=np.float64)
+K = np.array([
+    [FX, 0.0, CX],
+    [0.0, FY, CY],
+    [0.0, 0.0, 1.0]
+], dtype=np.float64)
+
+D = np.array([-0.03125212, 0.12170703, -0.00131824, -0.00245868, -0.10696144], dtype=np.float64)
+
 
 CAMERA_TO_BODY_OFFSET = np.array([[0.0], [0.0], [-0.00]])
 
@@ -239,20 +275,20 @@ def rotation_matrix_to_quaternion(R):
     return qx, qy, qz, qw
 
 
-def build_global_tag_corners(tag_map, tag_size):
-    s = tag_size / 2.0
-    local_corners = np.array(
-        [
-            [-s, s, 0.0],
-            [s, s, 0.0],
-            [s, -s, 0.0],
-            [-s, -s, 0.0],
-        ],
-        dtype=np.float32,
-    )
-
+def build_global_tag_corners(tag_map):
     global_corners_map = {}
     for tag_id, transform in tag_map.items():
+        s = transform["size"] / 2.0
+        local_corners = np.array(
+            [
+                [-s, s, 0.0],
+                [s, s, 0.0],
+                [s, -s, 0.0],
+                [-s, -s, 0.0],
+            ],
+            dtype=np.float32,
+        )
+
         R = rpy_to_rotation_matrix(transform["rpy"])
         t = np.array(transform["pos"], dtype=np.float32).reshape(3, 1)
 
@@ -262,7 +298,7 @@ def build_global_tag_corners(tag_map, tag_size):
     return global_corners_map
 
 
-GLOBAL_TAG_CORNERS = build_global_tag_corners(TAG_MAP, TAG_SIZE_METERS)
+GLOBAL_TAG_CORNERS = build_global_tag_corners(TAG_MAP)
 
 
 # ==============================================================================
@@ -319,9 +355,9 @@ class BlueROVLocalizationNode(Node):
         self.detector = apriltag.Detector(
             families=TAG_FAMILY,
             nthreads=4,
-            quad_decimate=2.0,
-            quad_sigma=0.0,
-            refine_edges=0,
+            quad_decimate=1.0, # downsample for speed
+            quad_sigma=0.0, # disable Gaussian blur for sharper edges
+            refine_edges=0, # disable edge refinement for speed
         )
 
         # ROI Tracking παραμέτροι
@@ -420,12 +456,12 @@ class BlueROVLocalizationNode(Node):
                     img_pts,
                     K,
                     D,
-                    reprojectionError=8.0,
+                    reprojectionError=8.0,  # how sensitive RANSAC is to outliers
                     flags=cv2.SOLVEPNP_SQPNP,
                 )
             else:
                 success, rvec, tvec = cv2.solvePnP(
-                    obj_pts, img_pts, K, D, flags=cv2.SOLVEPNP_IPPE_SQUARE
+                    obj_pts, img_pts, K, D, flags=cv2.SOLVEPNP_SQPNP
                 )
 
             if success:

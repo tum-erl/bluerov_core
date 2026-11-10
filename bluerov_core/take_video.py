@@ -23,7 +23,7 @@ from gi.repository import Gst
 # ==============================================================================
 # ΡΥΘΜΙΣΕΙΣ ΑΠΟΘΗΚΕΥΣΗΣ & FPS
 # ==============================================================================
-TARGET_FPS = 30.0
+TARGET_FPS = 1.0
 FRAME_INTERVAL = 1.0 / TARGET_FPS  # ~0.0333 δευτερόλεπτα
 
 # Ανάλυση του path (το os.path.expanduser μεταφράζει το ~ σε /root μέσα στο container)
@@ -181,7 +181,7 @@ def main():
     writer.start()
 
     video = Video(port=UDP_PORT)
-    window_name = "BlueROV2 Grayscale (Recording 30 FPS)"
+    window_name = "BlueROV2 Grayscale (Recording 1 FPS)"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
     saved_count = 0
