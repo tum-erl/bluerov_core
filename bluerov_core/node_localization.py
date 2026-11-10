@@ -279,12 +279,14 @@ def build_global_tag_corners(tag_map):
     global_corners_map = {}
     for tag_id, transform in tag_map.items():
         s = transform["size"] / 2.0
+        # Corner order must match pupil_apriltags detector output:
+        # 0: lower-left, 1: lower-right, 2: upper-right, 3: upper-left
         local_corners = np.array(
             [
-                [-s, s, 0.0],
-                [s, s, 0.0],
-                [s, -s, 0.0],
                 [-s, -s, 0.0],
+                [s, -s, 0.0],
+                [s, s, 0.0],
+                [-s, s, 0.0],
             ],
             dtype=np.float32,
         )
@@ -355,7 +357,7 @@ class BlueROVLocalizationNode(Node):
         self.detector = apriltag.Detector(
             families=TAG_FAMILY,
             nthreads=4,
-            quad_decimate=1.0, # downsample for speed
+            quad_decimate=1.0, # 1.0 = full resolution (increase for speed at cost of accuracy)
             quad_sigma=0.0, # disable Gaussian blur for sharper edges
             refine_edges=0, # disable edge refinement for speed
         )
@@ -394,9 +396,8 @@ class BlueROVLocalizationNode(Node):
         detected_tags_in_frame = {}
 
         # 1. APRILTAG DETECTION (ADAPTIVE ROI TRACKING)
-        run_full_scan = (len(self.tracked_tags) == 0) or (
-            self.frame_count % self.FULL_SCAN_INTERVAL == 0
-        )
+        periodic_full_scan = (self.frame_count % self.FULL_SCAN_INTERVAL == 0)
+        run_full_scan = (len(self.tracked_tags) == 0) or periodic_full_scan
 
         if run_full_scan:
             results = self.detector.detect(gray)
@@ -404,20 +405,28 @@ class BlueROVLocalizationNode(Node):
                 detected_tags_in_frame[r.tag_id] = r.corners
         else:
             for tag_id, track in list(self.tracked_tags.items()):
-                x1, y1, x2, y2 = track.get_roi_crop(FRAME_WIDTH, FRAME_HEIGHT)
+                x1, y1, x2, y2 = track.get_roi_crop(gray.shape[1], gray.shape[0])
                 roi_gray = gray[y1:y2, x1:x2]
 
                 roi_results = self.detector.detect(roi_gray)
                 matched = False
                 for r in roi_results:
+                    global_corners = r.corners + np.array([x1, y1])
                     if r.tag_id == tag_id:
-                        global_corners = r.corners + np.array([x1, y1])
                         detected_tags_in_frame[tag_id] = global_corners
                         matched = True
-                        break
+                    elif r.tag_id not in detected_tags_in_frame:
+                        # Pick up new tags discovered inside ROI crops
+                        detected_tags_in_frame[r.tag_id] = global_corners
 
                 if not matched:
                     track.lost_frames += 1
+
+            # Fallback: if ROI scans found nothing, do a full scan immediately
+            if not detected_tags_in_frame:
+                results = self.detector.detect(gray)
+                for r in results:
+                    detected_tags_in_frame[r.tag_id] = r.corners
 
         # Ενημέρωση/Δημιουργία trackers
         for tag_id, corners in detected_tags_in_frame.items():
@@ -456,7 +465,7 @@ class BlueROVLocalizationNode(Node):
                     img_pts,
                     K,
                     D,
-                    reprojectionError=8.0,  # how sensitive RANSAC is to outliers
+                    reprojectionError=30.0,  # how sensitive RANSAC is to outliers
                     flags=cv2.SOLVEPNP_SQPNP,
                 )
             else:
