@@ -40,45 +40,45 @@ SMALL_TAG_SIZE = 0.05
 BIG_TAG_SIZE = 0.125
 
 TAG_MAP = {
-    3: {
-        "pos": [-0.30, -.13, 0.0], 
-        "rpy": [0.0, 270.0, 0.0],
-        "size": BIG_TAG_SIZE,
-    },
-    1: {
-        "pos": [0.264, -0.280, 0.0],
-        "rpy": [0.0, 0.0, 0.0],
-        "size": BIG_TAG_SIZE,
-    },
+    # 3: {
+    #     "pos": [-0.30, -0.13, 0.0], 
+    #     "rpy": [0.0, 270.0, 0.0],
+    #     "size": BIG_TAG_SIZE,
+    # },
+    # 1: {
+    #     "pos": [0.263, -0.283, 0.0],
+    #     "rpy": [0.0, 0.0, 0.0],
+    #     "size": BIG_TAG_SIZE,
+    # },
     2: {
         "pos": [0.0, 0.0, 0.0],
         "rpy": [0.0, 0.0, 0.0],
         "size": BIG_TAG_SIZE,
-    },
-
-    1000: {
-        "pos": [-0.28, -0.575, 0.0],
-        "rpy": [0.0, 0.0, 0.0],
-        "size": SMALL_TAG_SIZE,
-    },
-
-    1001: {
-        "pos": [0.254, -0.575, 0.0],
-        "rpy": [0.0, 0.0, 0.0],
-        "size": SMALL_TAG_SIZE,
-    },
-
-    1002: {
-        "pos": [-0.235, 0.2, 0.0],
-        "rpy": [270.0, 180.0, 0.0],
-        "size": SMALL_TAG_SIZE,
-    },
-
-    1003: {
-        "pos": [0.285, -0.098, 0.0],
-        "rpy": [0.0, 90.0, 0.0],
-        "size": SMALL_TAG_SIZE,
     }
+
+    # 1000: {
+    #     "pos": [-0.28, -0.575, 0.0],
+    #     "rpy": [0.0, 0.0, 0.0],
+    #     "size": SMALL_TAG_SIZE,
+    # },
+
+    # 1001: {
+    #     "pos": [0.254, -0.575, 0.0],
+    #     "rpy": [0.0, 0.0, 0.0],
+    #     "size": SMALL_TAG_SIZE,
+    # },
+
+    # 1002: {
+    #     "pos": [-0.235, 0.2, 0.0],
+    #     "rpy": [270.0, 180.0, 0.0],
+    #     "size": SMALL_TAG_SIZE,
+    # },
+
+    # 1003: {
+    #     "pos": [0.285, -0.098, 0.0],
+    #     "rpy": [0.0, 90.0, 0.0],
+    #     "size": SMALL_TAG_SIZE,
+    # }
 }
 
 # ==============================================================================
@@ -359,7 +359,7 @@ class BlueROVLocalizationNode(Node):
             nthreads=4,
             quad_decimate=1.0, # 1.0 = full resolution (increase for speed at cost of accuracy)
             quad_sigma=0.0, # disable Gaussian blur for sharper edges
-            refine_edges=0, # disable edge refinement for speed
+            refine_edges=1, # disable edge refinement for speed
         )
 
         # ROI Tracking παραμέτροι
