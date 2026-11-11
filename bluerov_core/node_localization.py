@@ -368,6 +368,11 @@ class BlueROVLocalizationNode(Node):
         self.FULL_SCAN_INTERVAL = 30  # Πλήρες scan ανά 30 frames (ή αν δεν υπάρχουν tags)
         self.MAX_LOST_FRAMES = 5      # Διαγραφή από το tracking μετά από 5 χαμένα frames
 
+        # PnP Temporal Tracking (εξάλειψη jumps αμφισημίας)
+        self.prev_rvec = None
+        self.prev_tvec = None
+        self.lost_all_tags_count = 0
+
         self.get_logger().info(f"Connecting to UDP stream on port {self.port}...")
         self.video = Video(port=self.port)
 
@@ -459,21 +464,53 @@ class BlueROVLocalizationNode(Node):
             obj_pts = np.vstack(all_obj_pts).astype(np.float64)
             img_pts = np.vstack(all_img_pts).astype(np.float64)
 
-            if len(detected_known_ids) >= 2:
-                success, rvec, tvec, _ = cv2.solvePnPRansac(
+            if len(detected_known_ids) == 1:
+                # 1 Tag: 4 συνεπίπεδα σημεία -> Χρήση IPPE για εξάλειψη της αμφισημίας (planar ambiguity)
+                try:
+                    retval, rvecs, tvecs, _ = cv2.solvePnPGeneric(
+                        obj_pts, img_pts, K, D, flags=cv2.SOLVEPNP_IPPE
+                    )
+                    if retval > 0 and len(rvecs) > 0:
+                        success = True
+                        if len(rvecs) == 1 or self.prev_tvec is None:
+                            rvec, tvec = rvecs[0], tvecs[0]
+                        else:
+                            # Επιλογή της λύσης που βρίσκεται πιο κοντά στην προηγούμενη θέση (όχι jumps 30cm)
+                            d0 = np.linalg.norm(tvecs[0] - self.prev_tvec)
+                            d1 = np.linalg.norm(tvecs[1] - self.prev_tvec)
+                            idx = 0 if d0 <= d1 else 1
+                            rvec, tvec = rvecs[idx], tvecs[idx]
+                    else:
+                        success = False
+                except Exception:
+                    success, rvec, tvec = cv2.solvePnP(
+                        obj_pts, img_pts, K, D, flags=cv2.SOLVEPNP_IPPE
+                    )
+            else:
+                # 2 ή περισσότερα Tags (>= 8 σημεία):
+                # Χωρίς RANSAC — όλα τα σημεία είναι εγγυημένα έγκυρα AprilTag corners.
+                # Απευθείας μη-γραμμική βελτιστοποίηση σε όλα τα σημεία ταυτόχρονα.
+                success, rvec, tvec = cv2.solvePnP(
                     obj_pts,
                     img_pts,
                     K,
                     D,
-                    reprojectionError=30.0,  # how sensitive RANSAC is to outliers
                     flags=cv2.SOLVEPNP_SQPNP,
                 )
-            else:
-                success, rvec, tvec = cv2.solvePnP(
-                    obj_pts, img_pts, K, D, flags=cv2.SOLVEPNP_SQPNP
-                )
+                if not success:
+                    success, rvec, tvec = cv2.solvePnP(
+                        obj_pts,
+                        img_pts,
+                        K,
+                        D,
+                        flags=cv2.SOLVEPNP_ITERATIVE,
+                    )
 
             if success:
+                self.lost_all_tags_count = 0
+                self.prev_tvec = tvec.copy()
+                self.prev_rvec = rvec.copy()
+
                 R_cw, _ = cv2.Rodrigues(rvec)
                 t_cw = tvec.reshape(3, 1)
 
@@ -505,6 +542,11 @@ class BlueROVLocalizationNode(Node):
                     f"Orientation [deg]: Roll={rov_roll:+.1f}, Pitch={rov_pitch:+.1f}, Yaw={rov_yaw:+.1f}"
                 )
                 self.human_pub.publish(human_msg)
+        else:
+            self.lost_all_tags_count += 1
+            if self.lost_all_tags_count > 15:
+                self.prev_tvec = None
+                self.prev_rvec = None
 
     def destroy_node(self):
         self.is_running = False

@@ -4,10 +4,10 @@ BlueROV2 AprilTag Camera Localization ROS 2 Node — with Live Display
 Node: localization_node
 Features:
   - Same localization logic as node_localization.py
-  - Live OpenCV window showing the ROV camera feed (toggleable via ROS 2 parameter)
+  - Live OpenCV window showing the ROV camera feed in full RGB/BGR color
   - Detected AprilTags are highlighted with coloured bounding boxes & ID labels
   - Event-Driven Processing with dedicated worker thread (Condition variable)
-  - GRAY8 GStreamer pipeline (efficient), BGR conversion only for display overlay
+  - Native BGR GStreamer pipeline for true color display, fast cvtColor to Gray for AprilTags
 Parameters:
   - udp_port (int, default: 5600)
   - world_frame_id (string, default: "world")
@@ -48,45 +48,45 @@ SMALL_TAG_SIZE = 0.05
 BIG_TAG_SIZE = 0.125
 
 TAG_MAP = {
-    # 3: {
-    #     "pos": [-0.30, -0.13, 0.0],
-    #     "rpy": [0.0, 270.0, 0.0],
-    #     "size": BIG_TAG_SIZE,
-    # },
-    # 1: {
-    #     "pos": [0.263, -0.283, 0.0],
-    #     "rpy": [0.0, 0.0, 0.0],
-    #     "size": BIG_TAG_SIZE,
-    # },
+    3: {
+        "pos": [-0.301, -0.126, 0.055],
+        "rpy": [0.0, 270.0, 0.0],
+        "size": BIG_TAG_SIZE,
+    },
+    1: {
+        "pos": [0.263, -0.283, 0.0],
+        "rpy": [0.0, 0.0, 0.0],
+        "size": BIG_TAG_SIZE,
+    },
     2: {
         "pos": [0.0, 0.0, 0.0],
         "rpy": [0.0, 0.0, 0.0],
         "size": BIG_TAG_SIZE,
     },
 
-    # 1000: {
-    #     "pos": [-0.28, -0.575, 0.0],
-    #     "rpy": [0.0, 0.0, 0.0],
-    #     "size": SMALL_TAG_SIZE,
-    # },
+    1000: {
+        "pos": [0.0, -0.589, -0.020],
+        "rpy": [270.0, 0.0, 0.0],
+        "size": SMALL_TAG_SIZE,
+    },
 
     1001: {
         "pos": [0.128, 0.0, 0.0],
         "rpy": [0.0, 0.0, 0.0],
         "size": SMALL_TAG_SIZE,
+    },
+
+    1002: {
+        "pos": [-0.236, 0.02, -0.02],
+        "rpy": [270.0, 0.0, 0.0],
+        "size": SMALL_TAG_SIZE,
+    },
+
+    1003: {
+        "pos": [0.285, -0.098, 0.013],
+        "rpy": [0.0, 90.0, 0.0],
+        "size": SMALL_TAG_SIZE,
     }
-
-    # 1002: {
-    #     "pos": [-0.235, 0.2, 0.0],
-    #     "rpy": [270.0, 180.0, 0.0],
-    #     "size": SMALL_TAG_SIZE,
-    # },
-
-    # 1003: {
-    #     "pos": [0.285, -0.098, 0.0],
-    #     "rpy": [0.0, 90.0, 0.0],
-    #     "size": SMALL_TAG_SIZE,
-    # }
 }
 
 # ==============================================================================
@@ -113,16 +113,16 @@ CAMERA_TO_BODY_OFFSET = np.array([[0.0], [0.0], [-0.00]])
 
 
 # ==============================================================================
-# 3. BLUEROV2 VIDEO CAPTURE CLASS  (GRAY8 — same as node_localization.py)
+# 3. BLUEROV2 VIDEO CAPTURE CLASS (FULL BGR COLOR)
 # ==============================================================================
 class Video:
-    """BlueROV video capture class — GRAY8 GStreamer pipeline (efficient)."""
+    """BlueROV video capture class — BGR GStreamer pipeline for true color display."""
 
     def __init__(self, port=5600):
         Gst.init(None)
 
         self.port = port
-        self.latest_frame_data = None  # (gray_frame, arrival_time)
+        self.latest_frame_data = None  # (bgr_frame, arrival_time)
         self.running = True
         self.condition = threading.Condition()
 
@@ -132,7 +132,7 @@ class Video:
             f"rtpjitterbuffer latency=0 drop-on-latency=true"
         )
         self.video_codec = "! rtph264depay ! h264parse ! avdec_h264 max-threads=2"
-        self.video_decode = "! videoconvert ! video/x-raw, format=GRAY8"
+        self.video_decode = "! videoconvert ! video/x-raw, format=BGR"
         self.video_sink_conf = (
             "! appsink name=appsink0 emit-signals=true sync=false max-buffers=1 drop=true"
         )
@@ -146,7 +146,7 @@ class Video:
         if not config:
             config = [
                 "videotestsrc",
-                "! videoconvert ! video/x-raw, format=GRAY8",
+                "! videoconvert ! video/x-raw, format=BGR",
                 "! appsink name=appsink0",
             ]
 
@@ -157,7 +157,7 @@ class Video:
 
     @staticmethod
     def gst_to_opencv(sample):
-        """Extracts a 2D uint8 NumPy array (H, W) for Grayscale processing."""
+        """Extracts a 3D uint8 NumPy array (H, W, 3) for BGR color processing."""
         buf = sample.get_buffer()
         caps_structure = sample.get_caps().get_structure(0)
         h = caps_structure.get_value("height")
@@ -168,7 +168,7 @@ class Video:
             return None
 
         try:
-            frame = np.ndarray((h, w), buffer=map_info.data, dtype=np.uint8).copy()
+            frame = np.ndarray((h, w, 3), buffer=map_info.data, dtype=np.uint8).copy()
             return frame
         finally:
             buf.unmap(map_info)
@@ -433,6 +433,11 @@ class BlueROVLocalizationNode(Node):
         self.FULL_SCAN_INTERVAL = 30
         self.MAX_LOST_FRAMES = 5
 
+        # PnP Temporal Tracking (εξάλειψη jumps αμφισημίας)
+        self.prev_rvec = None
+        self.prev_tvec = None
+        self.lost_all_tags_count = 0
+
         # Display: shared frame between worker thread and main-thread display
         self.display_frame = None
         self.display_lock = threading.Lock()
@@ -468,7 +473,8 @@ class BlueROVLocalizationNode(Node):
 
     def process_pipeline(self, frame, recv_time):
         self.frame_count += 1
-        gray = frame
+        bgr_frame = frame
+        gray = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2GRAY)
         detected_tags_in_frame = {}
 
         # 1. APRILTAG DETECTION (ADAPTIVE ROI TRACKING)
@@ -522,7 +528,7 @@ class BlueROVLocalizationNode(Node):
 
         # 2. BUILD DISPLAY FRAME (only if display is enabled)
         if self.enable_display:
-            display = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            display = bgr_frame.copy()
             for tag_id, corners in detected_tags_in_frame.items():
                 draw_tag_overlay(display, tag_id, corners)
             with self.display_lock:
@@ -543,21 +549,53 @@ class BlueROVLocalizationNode(Node):
             obj_pts = np.vstack(all_obj_pts).astype(np.float64)
             img_pts = np.vstack(all_img_pts).astype(np.float64)
 
-            if len(detected_known_ids) >= 2:
-                success, rvec, tvec, _ = cv2.solvePnPRansac(
+            if len(detected_known_ids) == 1:
+                # 1 Tag: 4 συνεπίπεδα σημεία -> Χρήση IPPE για εξάλειψη της αμφισημίας (planar ambiguity)
+                try:
+                    retval, rvecs, tvecs, _ = cv2.solvePnPGeneric(
+                        obj_pts, img_pts, K, D, flags=cv2.SOLVEPNP_IPPE
+                    )
+                    if retval > 0 and len(rvecs) > 0:
+                        success = True
+                        if len(rvecs) == 1 or self.prev_tvec is None:
+                            rvec, tvec = rvecs[0], tvecs[0]
+                        else:
+                            # Επιλογή της λύσης που βρίσκεται πιο κοντά στην προηγούμενη θέση (όχι jumps 30cm)
+                            d0 = np.linalg.norm(tvecs[0] - self.prev_tvec)
+                            d1 = np.linalg.norm(tvecs[1] - self.prev_tvec)
+                            idx = 0 if d0 <= d1 else 1
+                            rvec, tvec = rvecs[idx], tvecs[idx]
+                    else:
+                        success = False
+                except Exception:
+                    success, rvec, tvec = cv2.solvePnP(
+                        obj_pts, img_pts, K, D, flags=cv2.SOLVEPNP_IPPE
+                    )
+            else:
+                # 2 ή περισσότερα Tags (>= 8 σημεία):
+                # Χωρίς RANSAC — όλα τα σημεία είναι εγγυημένα έγκυρα AprilTag corners.
+                # Απευθείας μη-γραμμική βελτιστοποίηση σε όλα τα σημεία ταυτόχρονα.
+                success, rvec, tvec = cv2.solvePnP(
                     obj_pts,
                     img_pts,
                     K,
                     D,
-                    reprojectionError=30.0,
                     flags=cv2.SOLVEPNP_SQPNP,
                 )
-            else:
-                success, rvec, tvec = cv2.solvePnP(
-                    obj_pts, img_pts, K, D, flags=cv2.SOLVEPNP_SQPNP
-                )
+                if not success:
+                    success, rvec, tvec = cv2.solvePnP(
+                        obj_pts,
+                        img_pts,
+                        K,
+                        D,
+                        flags=cv2.SOLVEPNP_ITERATIVE,
+                    )
 
             if success:
+                self.lost_all_tags_count = 0
+                self.prev_tvec = tvec.copy()
+                self.prev_rvec = rvec.copy()
+
                 R_cw, _ = cv2.Rodrigues(rvec)
                 t_cw = tvec.reshape(3, 1)
 
@@ -589,6 +627,11 @@ class BlueROVLocalizationNode(Node):
                     f"Orientation [deg]: Roll={rov_roll:+.1f}, Pitch={rov_pitch:+.1f}, Yaw={rov_yaw:+.1f}"
                 )
                 self.human_pub.publish(human_msg)
+        else:
+            self.lost_all_tags_count += 1
+            if self.lost_all_tags_count > 15:
+                self.prev_tvec = None
+                self.prev_rvec = None
 
     def display_callback(self):
         """ROS 2 timer callback (15 Hz) — shows the latest annotated frame via OpenCV."""
