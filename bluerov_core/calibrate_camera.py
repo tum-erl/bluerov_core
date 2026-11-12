@@ -18,11 +18,11 @@ CHECKERBOARD_INTERNAL_CORNERS = (7, 5)  # Εσωτερικές γωνίες (σ�
 SQUARE_SIZE_METERS = 0.040              # Μέγεθος πλευράς τετραγώνου σε μέτρα
 
 # Απόλυτο μονοπάτι για τις φωτογραφίες
-IMAGES_DIR = "/root/ros2_ws/BLUEROV_PHOTOS/selected_photos_in_air"
+IMAGES_DIR = "/root/ros2_ws/BLUEROV_PHOTOS/selected_photos"
 
 # Αποθήκευση του txt αρχείου στον ίδιο φάκελο όπου βρίσκεται το τρέχον script
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_TXT_FILE = os.path.join(SCRIPT_DIR, "calibration_params.txt")
+OUTPUT_TXT_FILE = os.path.join(SCRIPT_DIR, "calibration_params_water.txt")
 
 
 def main():

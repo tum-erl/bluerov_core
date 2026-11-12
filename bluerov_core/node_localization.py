@@ -96,15 +96,15 @@ TAG_MAP = {
 }
 
 # ==============================================================================
-# 2. CAMERA INTRINSICS & RIGID OFFSETS  (identical to node_localization.py)
+# 2. CAMERA INTRINSICS & RIGID OFFSETS
 # ==============================================================================
 FRAME_WIDTH = 1920
 FRAME_HEIGHT = 1080
 
-FX = 1031.7610
-FY = 1031.2645
-CX = 958.9953
-CY = 594.2563
+FX = 1055.3052
+FY = 1054.4018
+CX = 977.0207
+CY = 600.9562
 
 K = np.array([
     [FX, 0.0, CX],
@@ -112,7 +112,7 @@ K = np.array([
     [0.0, 0.0, 1.0]
 ], dtype=np.float64)
 
-D = np.array([-0.03125212, 0.12170703, -0.00131824, -0.00245868, -0.10696144], dtype=np.float64)
+D = np.array([-0.00458762, 0.06154082, 0.00437917, 0.00265318, -0.06060720], dtype=np.float64)
 
 
 CAMERA_TO_BODY_OFFSET = np.array([[0.0], [0.0], [-0.00]])
@@ -289,8 +289,18 @@ def rotation_matrix_to_quaternion(R):
     return qx, qy, qz, qw
 
 
-def build_global_tag_corners(tag_map):
+def build_tag_tables(tag_map):
+    """
+    Builds three lookup tables for each tag:
+      - global_corners : 3D corners in world frame (used for multi-tag PnP)
+      - local_corners  : 3D corners in tag-local frame, Z=0 (required by IPPE)
+      - transforms     : (R_tag_world, t_tag_world) for converting tag-frame poses
+                         back to world-frame poses after single-tag IPPE solve
+    """
     global_corners_map = {}
+    local_corners_map = {}
+    transforms_map = {}
+
     for tag_id, transform in tag_map.items():
         s = transform["size"] / 2.0
         # Corner order must match pupil_apriltags detector output:
@@ -298,23 +308,56 @@ def build_global_tag_corners(tag_map):
         local_corners = np.array(
             [
                 [-s, -s, 0.0],
-                [s, -s, 0.0],
-                [s, s, 0.0],
-                [-s, s, 0.0],
+                [ s, -s, 0.0],
+                [ s,  s, 0.0],
+                [-s,  s, 0.0],
             ],
-            dtype=np.float32,
+            dtype=np.float64,
         )
 
-        R = rpy_to_rotation_matrix(transform["rpy"])
-        t = np.array(transform["pos"], dtype=np.float32).reshape(3, 1)
+        R_tw = rpy_to_rotation_matrix(transform["rpy"])          # tag→world rotation
+        t_tw = np.array(transform["pos"], dtype=np.float64).reshape(3, 1)  # tag origin in world
 
-        corners_global = (R @ local_corners.T + t).T
-        global_corners_map[tag_id] = corners_global
+        corners_global = (R_tw @ local_corners.T + t_tw).T
 
-    return global_corners_map
+        global_corners_map[tag_id] = corners_global.astype(np.float64)
+        local_corners_map[tag_id] = local_corners                # already float64, Z=0
+        transforms_map[tag_id] = (R_tw, t_tw)
+
+    return global_corners_map, local_corners_map, transforms_map
 
 
-GLOBAL_TAG_CORNERS = build_global_tag_corners(TAG_MAP)
+GLOBAL_TAG_CORNERS, LOCAL_TAG_CORNERS, TAG_TRANSFORMS = build_tag_tables(TAG_MAP)
+
+
+def ippe_solution_to_world_pos(rvec, tvec, R_tw, t_tw):
+    """
+    Given an IPPE solution (rvec, tvec) in tag-local frame and the tag's
+    world transform (R_tw, t_tw), compute the ROV world position t_wb.
+
+    Camera pose in tag frame:
+        R_ct  = Rodrigues(rvec)       # rotation: tag→camera
+        t_ct  = tvec                   # camera origin in tag frame
+
+    Camera pose in world frame:
+        R_wc  = (R_ct @ R_tw^T)^T     →  R_wc = R_tw @ R_ct^T
+        t_wc  = R_tw @ (-R_ct^T @ t_ct) + t_tw
+
+    Body position:
+        t_wb  = t_wc + R_wc @ CAMERA_TO_BODY_OFFSET
+    """
+    R_ct, _ = cv2.Rodrigues(rvec)
+    t_ct = tvec.reshape(3, 1)
+
+    # World rotation of camera
+    R_wc = R_tw @ R_ct.T
+
+    # World position of camera
+    t_wc = R_tw @ (-R_ct.T @ t_ct) + t_tw
+
+    # World position of body (ROV)
+    t_wb = t_wc + R_wc @ CAMERA_TO_BODY_OFFSET
+    return R_wc, t_wb
 
 
 # ==============================================================================
@@ -440,8 +483,7 @@ class BlueROVLocalizationNode(Node):
         self.MAX_LOST_FRAMES = 5
 
         # PnP Temporal Tracking (εξάλειψη jumps αμφισημίας)
-        self.prev_rvec = None
-        self.prev_tvec = None
+        self.prev_world_pos = None   # t_wb της προηγούμενης εκτίμησης (παγκόσμια θέση ROV)
         self.lost_all_tags_count = 0
 
         # Display: shared frame between worker thread and main-thread display
@@ -552,62 +594,90 @@ class BlueROVLocalizationNode(Node):
                 detected_known_ids.append(tag_id)
 
         if len(detected_known_ids) > 0:
-            obj_pts = np.vstack(all_obj_pts).astype(np.float64)
-            img_pts = np.vstack(all_img_pts).astype(np.float64)
+            R_wc = None
+            t_wb = None
+            success = False
 
             if len(detected_known_ids) == 1:
-                # 1 Tag: 4 συνεπίπεδα σημεία -> Χρήση IPPE για εξάλειψη της αμφισημίας (planar ambiguity)
+                # ==============================================================
+                # 1 Tag: IPPE (Infinite Planar Pose Estimation)
+                #
+                # IPPE ΑΠΑΙΤΕΙ τα obj_pts να είναι σε τοπικό επίπεδο (Z=0).
+                # Χρησιμοποιούμε LOCAL_TAG_CORNERS (Z=0) και μετά μετατρέπουμε
+                # τη λύση από tag-frame → world-frame χρησιμοποιώντας το
+                # γνωστό TAG_TRANSFORMS[tag_id] = (R_tw, t_tw).
+                #
+                # Η επιλογή ανάμεσα στις 2 λύσεις γίνεται συγκρίνοντας την
+                # τελική ΠΑΓΚΟΣΜΙΑ θέση ROV (t_wb), ΟΧΙ το τοπικό tvec.
+                # ==============================================================
+                tag_id = detected_known_ids[0]
+                local_pts = LOCAL_TAG_CORNERS[tag_id].astype(np.float64)
+                img_pts = all_img_pts[0].astype(np.float64)
+                R_tw, t_tw = TAG_TRANSFORMS[tag_id]
+
                 try:
                     retval, rvecs, tvecs, _ = cv2.solvePnPGeneric(
-                        obj_pts, img_pts, K, D, flags=cv2.SOLVEPNP_IPPE
+                        local_pts, img_pts, K, D, flags=cv2.SOLVEPNP_IPPE
                     )
                     if retval > 0 and len(rvecs) > 0:
                         success = True
-                        if len(rvecs) == 1 or self.prev_tvec is None:
-                            rvec, tvec = rvecs[0], tvecs[0]
+                        if len(rvecs) == 1 or self.prev_world_pos is None:
+                            # Κρατάμε την πρώτη (χαμηλότερο reprojection error)
+                            best_R_wc, best_t_wb = ippe_solution_to_world_pos(
+                                rvecs[0], tvecs[0], R_tw, t_tw
+                            )
                         else:
-                            # Επιλογή της λύσης που βρίσκεται πιο κοντά στην προηγούμενη θέση (όχι jumps 30cm)
-                            d0 = np.linalg.norm(tvecs[0] - self.prev_tvec)
-                            d1 = np.linalg.norm(tvecs[1] - self.prev_tvec)
-                            idx = 0 if d0 <= d1 else 1
-                            rvec, tvec = rvecs[idx], tvecs[idx]
+                            # Μετατρέπουμε ΚΑΙ ΤΙΣ ΔΥΟ λύσεις σε world-frame
+                            # και επιλέγουμε αυτή που είναι πιο κοντά στην
+                            # προηγούμενη παγκόσμια θέση (εξάλειψη jumps).
+                            R_wc_0, t_wb_0 = ippe_solution_to_world_pos(rvecs[0], tvecs[0], R_tw, t_tw)
+                            R_wc_1, t_wb_1 = ippe_solution_to_world_pos(rvecs[1], tvecs[1], R_tw, t_tw)
+                            d0 = np.linalg.norm(t_wb_0 - self.prev_world_pos)
+                            d1 = np.linalg.norm(t_wb_1 - self.prev_world_pos)
+                            if d0 <= d1:
+                                best_R_wc, best_t_wb = R_wc_0, t_wb_0
+                            else:
+                                best_R_wc, best_t_wb = R_wc_1, t_wb_1
+
+                        R_wc = best_R_wc
+                        t_wb = best_t_wb
                     else:
                         success = False
                 except Exception:
-                    success, rvec, tvec = cv2.solvePnP(
-                        obj_pts, img_pts, K, D, flags=cv2.SOLVEPNP_IPPE
+                    # Fallback: κλασικό solvePnP με local corners
+                    ok, rvec_fb, tvec_fb = cv2.solvePnP(
+                        local_pts, img_pts, K, D, flags=cv2.SOLVEPNP_IPPE
                     )
+                    if ok:
+                        success = True
+                        R_wc, t_wb = ippe_solution_to_world_pos(rvec_fb, tvec_fb, R_tw, t_tw)
             else:
-                # 2 ή περισσότερα Tags (>= 8 σημεία):
-                # Χωρίς RANSAC — όλα τα σημεία είναι εγγυημένα έγκυρα AprilTag corners.
-                # Απευθείας μη-γραμμική βελτιστοποίηση σε όλα τα σημεία ταυτόχρονα.
-                success, rvec, tvec = cv2.solvePnP(
-                    obj_pts,
-                    img_pts,
-                    K,
-                    D,
-                    flags=cv2.SOLVEPNP_SQPNP,
+                # ==============================================================
+                # 2+ Tags (>= 8 σημεία):
+                # Χωρίς RANSAC — όλα τα AprilTag corners είναι εγγυημένα σωστά.
+                # Χρησιμοποιούμε GLOBAL corners (παγκόσμιες 3D θέσεις) και
+                # επιλύουμε απ' ευθείας σε world-frame.
+                # ==============================================================
+                obj_pts = np.vstack(all_obj_pts).astype(np.float64)
+                img_pts = np.vstack(all_img_pts).astype(np.float64)
+                ok, rvec, tvec = cv2.solvePnP(
+                    obj_pts, img_pts, K, D, flags=cv2.SOLVEPNP_SQPNP,
                 )
-                if not success:
-                    success, rvec, tvec = cv2.solvePnP(
-                        obj_pts,
-                        img_pts,
-                        K,
-                        D,
-                        flags=cv2.SOLVEPNP_ITERATIVE,
+                if not ok:
+                    ok, rvec, tvec = cv2.solvePnP(
+                        obj_pts, img_pts, K, D, flags=cv2.SOLVEPNP_ITERATIVE,
                     )
+                if ok:
+                    success = True
+                    R_cw, _ = cv2.Rodrigues(rvec)
+                    R_wc = R_cw.T
+                    t_cw = tvec.reshape(3, 1)
+                    t_wc = -R_wc @ t_cw
+                    t_wb = t_wc + R_wc @ CAMERA_TO_BODY_OFFSET
 
-            if success:
+            if success and R_wc is not None and t_wb is not None:
                 self.lost_all_tags_count = 0
-                self.prev_tvec = tvec.copy()
-                self.prev_rvec = rvec.copy()
-
-                R_cw, _ = cv2.Rodrigues(rvec)
-                t_cw = tvec.reshape(3, 1)
-
-                R_wc = R_cw.T
-                t_wc = -R_wc @ t_cw
-                t_wb = t_wc + R_wc @ CAMERA_TO_BODY_OFFSET
+                self.prev_world_pos = t_wb.copy()
 
                 rov_x, rov_y, rov_z = t_wb.flatten()
                 rov_roll, rov_pitch, rov_yaw = rotation_matrix_to_rpy(R_wc)
@@ -636,8 +706,7 @@ class BlueROVLocalizationNode(Node):
         else:
             self.lost_all_tags_count += 1
             if self.lost_all_tags_count > 15:
-                self.prev_tvec = None
-                self.prev_rvec = None
+                self.prev_world_pos = None
 
     def display_callback(self):
         """ROS 2 timer callback (15 Hz) — shows the latest annotated frame via OpenCV."""
