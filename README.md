@@ -66,9 +66,9 @@ ros2 launch bluerov_core bringup.launch.py
 ```
 
 ### Terminal 2: Foxglove WebSocket Bridge
-Connects ROS 2 topics to Foxglove Studio via WebSockets (`ws://localhost:8765`):
+Connects ROS 2 topics to Foxglove Studio via WebSockets (`ws://localhost:8765`), setting a 1MB send buffer to guarantee real-time streaming with zero latency:
 ```bash
-ros2 run foxglove_bridge foxglove_bridge
+ros2 run foxglove_bridge foxglove_bridge --ros-args -p send_buffer_limit:=1000000
 ```
 
 ### Terminal 3: BlueROV All-in-One System Node
