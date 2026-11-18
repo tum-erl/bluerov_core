@@ -157,23 +157,13 @@ def draw_tag_overlay(display_frame, tag_id, corners_2d, color=None):
     cx, cy = int(np.mean(corners_2d[:, 0])), int(np.mean(corners_2d[:, 1]))
     cv2.putText(display_frame, f"ID {tag_id}", (cx - 20, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
 
-def make_compressed_msg(frame, frame_id, stamp, quality=75, target_width=960):
-    """Encodes BGR OpenCV frame into a lightweight JPEG CompressedImage message.
-    Downscales to target_width (default 960px) to radically accelerate JPEG encoding
-    and minimize bandwidth/CPU load for Foxglove Studio."""
-    if target_width is not None and frame.shape[1] > target_width:
-        scale = target_width / float(frame.shape[1])
-        new_w = int(target_width)
-        new_h = int(frame.shape[0] * scale)
-        frame_to_encode = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-    else:
-        frame_to_encode = frame
-
+def make_compressed_msg(frame, frame_id, stamp, quality=75):
+    """Encodes BGR OpenCV frame directly into a lightweight JPEG CompressedImage message."""
     msg = CompressedImage()
     msg.header.stamp = stamp
     msg.header.frame_id = frame_id
     msg.format = "jpeg"
-    ok, buf = cv2.imencode(".jpg", frame_to_encode, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
+    ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
     if ok:
         msg.data = buf.tobytes()
         return msg
@@ -183,7 +173,7 @@ def make_compressed_msg(frame, frame_id, stamp, quality=75, target_width=960):
 # 3. GSTREAMER / OPENCV VIDEO INGESTION CLASS
 # ==============================================================================
 class GstVideoReceiver:
-    """Robust threaded GStreamer UDP receiver for H.264 BlueROV streams."""
+    """Robust zero-latency GStreamer UDP receiver for H.264 BlueROV streams."""
     def __init__(self, port=5600, name="cam"):
         Gst.init(None)
         self.port = port
@@ -205,13 +195,13 @@ class GstVideoReceiver:
         else:
             self.sink_name = f"sink_{self.name}_{self.port}"
             self.video_source = (
-                f"udpsrc port={self.port} "
+                f"udpsrc port={self.port} buffer-size=65536 "
                 f'caps="application/x-rtp, media=video, clock-rate=90000, encoding-name=H264, payload=96" ! '
-                f"rtpjitterbuffer latency=0 drop-on-latency=true"
+                f"rtpjitterbuffer latency=50 drop-on-latency=true"
             )
             self.video_codec = "! rtph264depay ! h264parse ! avdec_h264 max-threads=2"
             self.video_decode = "! videoconvert ! video/x-raw, format=BGR"
-            self.video_sink_conf = f"! appsink name={self.sink_name} emit-signals=true sync=false max-buffers=1 drop=true"
+            self.video_sink_conf = f"! appsink name={self.sink_name} emit-signals=false sync=false max-buffers=1 drop=true"
 
             self.video_pipe = None
             self.video_sink = None
@@ -222,29 +212,9 @@ class GstVideoReceiver:
         try:
             self.video_pipe = Gst.parse_launch(command)
             self.video_sink = self.video_pipe.get_by_name(self.sink_name)
-            self.video_sink.connect("new-sample", self.on_new_sample)
             self.video_pipe.set_state(Gst.State.PLAYING)
         except Exception as e:
             print(f"[GstVideoReceiver] Error starting pipeline on port {self.port}: {e}", file=sys.stderr)
-
-    def on_new_sample(self, sink):
-        recv_time = time.time()
-        sample = sink.emit("pull-sample")
-        if sample:
-            buf = sample.get_buffer()
-            caps_structure = sample.get_caps().get_structure(0)
-            h = caps_structure.get_value("height")
-            w = caps_structure.get_value("width")
-            success, map_info = buf.map(Gst.MapFlags.READ)
-            if success:
-                try:
-                    frame = np.ndarray((h, w, 3), buffer=map_info.data, dtype=np.uint8).copy()
-                    with self.condition:
-                        self.latest_frame_data = (frame, recv_time)
-                        self.condition.notify()
-                finally:
-                    buf.unmap(map_info)
-        return Gst.FlowReturn.OK
 
     def _v4l2_loop(self):
         while self.running and self.cap.isOpened():
@@ -258,14 +228,44 @@ class GstVideoReceiver:
                 time.sleep(0.01)
 
     def get_latest_frame_blocking(self, timeout=0.2):
-        with self.condition:
-            while self.latest_frame_data is None and self.running:
-                self.condition.wait(timeout=timeout)
-            if not self.running or self.latest_frame_data is None:
-                return None, None
-            frame, recv_time = self.latest_frame_data
-            self.latest_frame_data = None
-            return frame, recv_time
+        if self.is_v4l2:
+            with self.condition:
+                while self.latest_frame_data is None and self.running:
+                    self.condition.wait(timeout=timeout)
+                if not self.running or self.latest_frame_data is None:
+                    return None, None
+                frame, recv_time = self.latest_frame_data
+                self.latest_frame_data = None
+                return frame, recv_time
+
+        if not self.running or not self.video_sink:
+            return None, None
+
+        timeout_ns = int(timeout * 1e9)
+        sample = self.video_sink.emit("try-pull-sample", timeout_ns)
+        if sample is None:
+            return None, None
+
+        # Drain any newer sample to guarantee the freshest real-time frame
+        while True:
+            newer = self.video_sink.emit("try-pull-sample", 0)
+            if newer is None:
+                break
+            sample = newer
+
+        buf = sample.get_buffer()
+        caps_structure = sample.get_caps().get_structure(0)
+        h = caps_structure.get_value("height")
+        w = caps_structure.get_value("width")
+        success, map_info = buf.map(Gst.MapFlags.READ)
+        if success:
+            try:
+                frame = np.ndarray((h, w, 3), buffer=map_info.data, dtype=np.uint8).copy()
+                recv_time = time.time()
+                return frame, recv_time
+            finally:
+                buf.unmap(map_info)
+        return None, None
 
     def stop(self):
         self.running = False
@@ -330,26 +330,17 @@ class BlueROVSystemNode(Node):
         )
 
         # ----------------------------------------------------------------------
-        # Publishers
+        # Publishers (Clean & Minimal: Only topics Foxglove actually uses)
         # ----------------------------------------------------------------------
-        # Camera 1 (Annotated with AprilTags): Published as CompressedImage for lightweight WebSockets
+        # Camera 1 (Annotated stream for Navigation): CompressedImage
         self.pub_annotated_cam1 = self.create_publisher(CompressedImage, "camera/image_annotated", sensor_qos)
-        self.pub_annotated_cam1_comp = self.create_publisher(CompressedImage, "camera/image_annotated/compressed", sensor_qos)
-        self.pub_annotated_cam1_rov = self.create_publisher(CompressedImage, "rov/camera/image_annotated", sensor_qos)
 
-        # Camera 2 (Auxiliary raw & annotated stream): CompressedImage
+        # Camera 2 (Annotated inspection stream): CompressedImage
         if self.enable_cam2:
-            self.pub_cam2 = self.create_publisher(CompressedImage, "camera2/image_raw", sensor_qos)
-            self.pub_cam2_comp = self.create_publisher(CompressedImage, "camera2/image_raw/compressed", sensor_qos)
-            self.pub_cam2_rov = self.create_publisher(CompressedImage, "rov/camera2/image_raw", sensor_qos)
             self.pub_cam2_annotated = self.create_publisher(CompressedImage, "camera2/image_annotated", sensor_qos)
-            self.pub_cam2_annotated_comp = self.create_publisher(CompressedImage, "camera2/image_annotated/compressed", sensor_qos)
-            self.pub_cam2_rov_annotated = self.create_publisher(CompressedImage, "rov/camera2/image_annotated", sensor_qos)
 
         # Navigation & TF
         self.pose_pub = self.create_publisher(PoseStamped, "rov/pose", 10)
-        self.pose_pub_root = self.create_publisher(PoseStamped, "pose", 10)
-        self.camera_pose_pub = self.create_publisher(PoseStamped, "rov/camera_pose", 10)
         self.human_pub = self.create_publisher(String, "rov/pose_human_readable", 10)
         self.tag_marker_pub = self.create_publisher(MarkerArray, "rov/tags_markers", 10)
 
@@ -541,53 +532,25 @@ class BlueROVSystemNode(Node):
 
             stamp = self.get_clock().now().to_msg()
 
-            # 1. Annotated stream: Only process and detect tags if Foxglove is subscribed
-            sub_annotated = (
-                self.pub_cam2_annotated.get_subscription_count() +
-                self.pub_cam2_annotated_comp.get_subscription_count() +
-                self.pub_cam2_rov_annotated.get_subscription_count()
-            )
-            if sub_annotated > 0:
-                # Detect any tag in the TagStandard family (no localization / PnP needed)
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                detections = self.detector_cam2.detect(gray)
+            # Process & publish only if Foxglove is subscribed to camera2/image_annotated
+            if self.pub_cam2_annotated.get_subscription_count() > 0:
+                h, w = frame.shape[:2]
+                new_w = self.output_width
+                new_h = int(h * (new_w / float(w)))
 
-                # Draw square bounding box and ID for all detected tags (green only for Cam2)
-                annotated_cam2 = frame.copy()
-                for r in detections:
-                    draw_tag_overlay(annotated_cam2, r.tag_id, r.corners, color=(0, 255, 0))
+                # Downscale directly: 4x faster detection, zero 6MB full-frame copying
+                small_cam2 = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                gray2 = cv2.cvtColor(small_cam2, cv2.COLOR_BGR2GRAY)
+                detections2 = self.detector_cam2.detect(gray2)
 
-                # Publish Annotated Compressed Stream for Foxglove (downscaled for speed)
+                for r in detections2:
+                    draw_tag_overlay(small_cam2, r.tag_id, r.corners, color=(0, 255, 0))
+
                 comp_annotated = make_compressed_msg(
-                    annotated_cam2, self.camera2_frame, stamp,
-                    quality=self.jpeg_quality, target_width=self.output_width
+                    small_cam2, self.camera2_frame, stamp, quality=self.jpeg_quality
                 )
                 if comp_annotated:
-                    if self.pub_cam2_annotated.get_subscription_count() > 0:
-                        self.pub_cam2_annotated.publish(comp_annotated)
-                    if self.pub_cam2_annotated_comp.get_subscription_count() > 0:
-                        self.pub_cam2_annotated_comp.publish(comp_annotated)
-                    if self.pub_cam2_rov_annotated.get_subscription_count() > 0:
-                        self.pub_cam2_rov_annotated.publish(comp_annotated)
-
-            # 2. Raw Compressed Stream: Only publish if subscribed
-            sub_raw = (
-                self.pub_cam2.get_subscription_count() +
-                self.pub_cam2_comp.get_subscription_count() +
-                self.pub_cam2_rov.get_subscription_count()
-            )
-            if sub_raw > 0:
-                comp_raw = make_compressed_msg(
-                    frame, self.camera2_frame, stamp,
-                    quality=self.jpeg_quality, target_width=self.output_width
-                )
-                if comp_raw:
-                    if self.pub_cam2.get_subscription_count() > 0:
-                        self.pub_cam2.publish(comp_raw)
-                    if self.pub_cam2_comp.get_subscription_count() > 0:
-                        self.pub_cam2_comp.publish(comp_raw)
-                    if self.pub_cam2_rov.get_subscription_count() > 0:
-                        self.pub_cam2_rov.publish(comp_raw)
+                    self.pub_cam2_annotated.publish(comp_annotated)
 
     # --------------------------------------------------------------------------
     # PRIMARY CAMERA WORKER (Localization & Tag Overlay)
@@ -609,27 +572,25 @@ class BlueROVSystemNode(Node):
                     detected_tags[r.tag_id] = r.corners
 
             # 2. Draw Visual Overlay & Publish Compressed Image directly to Foxglove
-            sub_annotated_cam1 = (
-                self.pub_annotated_cam1.get_subscription_count() +
-                self.pub_annotated_cam1_comp.get_subscription_count() +
-                self.pub_annotated_cam1_rov.get_subscription_count()
-            )
-            if sub_annotated_cam1 > 0:
-                annotated_frame = bgr_frame.copy()
+            if self.pub_annotated_cam1.get_subscription_count() > 0:
+                h, w = bgr_frame.shape[:2]
+                new_w = self.output_width
+                new_h = int(h * (new_w / float(w)))
+
+                small_cam1 = cv2.resize(bgr_frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                scale_x = float(new_w) / float(w)
+                scale_y = float(new_h) / float(h)
                 for tag_id, corners in detected_tags.items():
-                    draw_tag_overlay(annotated_frame, tag_id, corners)
+                    scaled_corners = corners.copy()
+                    scaled_corners[:, 0] *= scale_x
+                    scaled_corners[:, 1] *= scale_y
+                    draw_tag_overlay(small_cam1, tag_id, scaled_corners)
 
                 comp_annotated = make_compressed_msg(
-                    annotated_frame, self.camera_frame, now_stamp,
-                    quality=self.jpeg_quality, target_width=self.output_width
+                    small_cam1, self.camera_frame, now_stamp, quality=self.jpeg_quality
                 )
                 if comp_annotated:
-                    if self.pub_annotated_cam1.get_subscription_count() > 0:
-                        self.pub_annotated_cam1.publish(comp_annotated)
-                    if self.pub_annotated_cam1_comp.get_subscription_count() > 0:
-                        self.pub_annotated_cam1_comp.publish(comp_annotated)
-                    if self.pub_annotated_cam1_rov.get_subscription_count() > 0:
-                        self.pub_annotated_cam1_rov.publish(comp_annotated)
+                    self.pub_annotated_cam1.publish(comp_annotated)
 
             # 3. Dual-Engine PnP Solver
             num_tags = len(detected_tags)
@@ -767,7 +728,7 @@ class BlueROVSystemNode(Node):
                 x_c, y_c, z_c = self.filtered_cam_pos
                 qx_wc, qy_wc, qz_wc, qw_wc = self.filtered_cam_quat
 
-                # ROV Pose
+                # ROV Pose (FLU)
                 pose_msg = PoseStamped()
                 pose_msg.header.stamp = now_stamp
                 pose_msg.header.frame_id = self.world_frame
@@ -779,20 +740,6 @@ class BlueROVSystemNode(Node):
                 pose_msg.pose.orientation.z = float(qz_r)
                 pose_msg.pose.orientation.w = float(qw_r)
                 self.pose_pub.publish(pose_msg)
-                self.pose_pub_root.publish(pose_msg)
-
-                # Camera Pose
-                cam_pose_msg = PoseStamped()
-                cam_pose_msg.header.stamp = now_stamp
-                cam_pose_msg.header.frame_id = self.world_frame
-                cam_pose_msg.pose.position.x = float(x_c)
-                cam_pose_msg.pose.position.y = float(y_c)
-                cam_pose_msg.pose.position.z = float(z_c)
-                cam_pose_msg.pose.orientation.x = float(qx_wc)
-                cam_pose_msg.pose.orientation.y = float(qy_wc)
-                cam_pose_msg.pose.orientation.z = float(qz_wc)
-                cam_pose_msg.pose.orientation.w = float(qw_wc)
-                self.camera_pose_pub.publish(cam_pose_msg)
 
                 # TF: world -> rov
                 t_stamped_rov = TransformStamped()
