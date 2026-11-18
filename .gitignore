@@ -1,0 +1,16 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# ROS 2 build artifacts (if in repo root)
+build/
+install/
+log/
+
+# IDE & editors
+.vscode/
+.idea/
+*.swp
+*~

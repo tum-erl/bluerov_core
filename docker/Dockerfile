@@ -1,7 +1,7 @@
 # 1. Base image: Το επίσημο ROS 2 Jazzy Desktop (Ubuntu 24.04 base)
 FROM osrf/ros:jazzy-desktop
 
-# Εγκατάσταση απαραίτητων εργαλείων συστήματος, GTK/GObject bindings και GStreamer
+# Εγκατάσταση απαραίτητων εργαλείων συστήματος, ROS packages, CV Bridge & Foxglove Bridge
 RUN apt-get update && apt-get install -y \
     python3-pip \
     python3-colcon-common-extensions \
@@ -18,11 +18,14 @@ RUN apt-get update && apt-get install -y \
     gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-ugly \
     gstreamer1.0-libav \
+    ros-jazzy-cv-bridge \
+    ros-jazzy-foxglove-bridge \
     && rm -rf /var/lib/apt/lists/*
 
 # Εγκατάσταση του pupil-apriltags
 RUN pip install --no-cache-dir --break-system-packages \
     pupil-apriltags
+
 # 3. Αρχικοποίηση rosdep (αν δεν έχει ήδη γίνει στο base image)
 RUN if [ ! -f /etc/ros/rosdep/sources.list.d/20-default.list ]; then \
         rosdep init; \

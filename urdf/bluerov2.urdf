@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<robot name="bluerov2">
+
+  <!-- 1. Το Link του σώματος του ROV -->
+  <link name="rov">
+    <visual>
+      <!-- Ευθυγράμμιση mesh με ROS FLU: Nose στο +X, Left στο +Y, Top στο +Z -->
+      <origin xyz="0 0 0" rpy="1.5708 0 1.5708"/>
+      <geometry>
+        <!-- Διαδρομή προς το 3D σου αρχείο (scale 0.1 για μετατροπή decimeters σε meters) -->
+        <mesh filename="package://bluerov_core/urdf/bluerov2.stl" scale="0.1 0.1 0.1"/>
+      </geometry>
+      <material name="blue">
+        <color rgba="0.0 0.4 0.8 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <!-- 2. Η κάμερα σταθερά βιδωμένη πάνω στο ROV -->
+  <link name="camera_optical_frame"/>
+
+  <joint name="rov_to_camera_joint" type="fixed">
+    <parent link="rov"/>
+    <child link="camera_optical_frame"/>
+    <!-- Βάλε εδώ ακριβώς το offset της κάμερας που έχεις στον κώδικα (CAMERA_TO_BODY_OFFSET) -->
+    <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+  </joint>
+
+</robot>

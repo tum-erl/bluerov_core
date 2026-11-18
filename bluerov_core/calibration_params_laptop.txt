@@ -1,0 +1,18 @@
+# Resolution: 1280x720
+# Mean Reprojection Error: 0.0316 px
+
+FRAME_WIDTH = 1280
+FRAME_HEIGHT = 720
+
+FX = 959.0366
+FY = 957.5605
+CX = 634.5466
+CY = 359.5301
+
+K = np.array([
+    [FX, 0.0, CX],
+    [0.0, FY, CY],
+    [0.0, 0.0, 1.0]
+], dtype=np.float64)
+
+D = np.array([0.02858738, -0.17890580, 0.00004431, -0.00097149, 0.21887859], dtype=np.float64)

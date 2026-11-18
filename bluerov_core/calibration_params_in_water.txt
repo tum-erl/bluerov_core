@@ -1,4 +1,8 @@
+# Resolution: 1920x1080
 # Mean Reprojection Error: 0.0385 px
+
+FRAME_WIDTH = 1920
+FRAME_HEIGHT = 1080
 
 FX = 1055.3052
 FY = 1054.4018

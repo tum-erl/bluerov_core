@@ -22,7 +22,7 @@ IMAGES_DIR = "/root/ros2_ws/BLUEROV_PHOTOS/selected_photos"
 
 # Αποθήκευση του txt αρχείου στον ίδιο φάκελο όπου βρίσκεται το τρέχον script
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_TXT_FILE = os.path.join(SCRIPT_DIR, "calibration_params_water.txt")
+OUTPUT_TXT_FILE = os.path.join(SCRIPT_DIR, "calibration_params_in_water.txt")
 
 
 def main():
@@ -98,6 +98,8 @@ def main():
         total_error += error
 
     mean_error = total_error / len(objpoints)
+    w_calib, h_calib = gray_shape
+    print(f"[*] Calibration Resolution: {w_calib}x{h_calib}")
     print(f"[*] Mean Reprojection Error: {mean_error:.4f} pixels")
 
     fx = K[0, 0]
@@ -108,7 +110,10 @@ def main():
 
     # Δομή κειμένου για το txt αρχείο
     output_content = (
+        f"# Resolution: {w_calib}x{h_calib}\n"
         f"# Mean Reprojection Error: {mean_error:.4f} px\n\n"
+        f"FRAME_WIDTH = {w_calib}\n"
+        f"FRAME_HEIGHT = {h_calib}\n\n"
         f"FX = {fx:.4f}\n"
         f"FY = {fy:.4f}\n"
         f"CX = {cx:.4f}\n"

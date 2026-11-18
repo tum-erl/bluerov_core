@@ -1,0 +1,18 @@
+# Resolution: 1920x1080
+# Mean Reprojection Error: 0.0427 px
+
+FRAME_WIDTH = 1920
+FRAME_HEIGHT = 1080
+
+FX = 1035.7549
+FY = 1036.4702
+CX = 971.0844
+CY = 605.2601
+
+K = np.array([
+    [FX, 0.0, CX],
+    [0.0, FY, CY],
+    [0.0, 0.0, 1.0]
+], dtype=np.float64)
+
+D = np.array([-0.01495590, 0.05971814, 0.00197232, 0.00178856, -0.05786127], dtype=np.float64)

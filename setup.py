@@ -1,3 +1,5 @@
+import os
+from glob import glob
 from setuptools import find_packages, setup
 
 package_name = 'bluerov_core'
@@ -10,6 +12,10 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        # Αυτές είναι οι προσθήκες για τα launch, urdf και meshes αρχεία:
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
+        (os.path.join('share', package_name, 'urdf'), glob('urdf/*')),
+        (os.path.join('share', package_name, 'meshes'), glob('meshes/*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -24,8 +30,12 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'localization = bluerov_core.node_localization_timer:main',
-            'visualization = bluerov_core.node_visualization:main',
+            'bluerov_system = bluerov_core.bluerov_system_node:main',
+            'localization = bluerov_core.localization_node:main',
+            'localization2 = bluerov_core.localization_node2:main',
+            'camera_publisher = bluerov_core.camera_publisher_node:main',
+            'camera_publisher2 = bluerov_core.camera_publisher2:main',
+            'laptop_cam_publisher = bluerov_core.laptop_camera_publisher_node:main'
         ],
     },
 )
