@@ -1,6 +1,0 @@
-[33me67df0d[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m Added ROI. works perfectly at 32 Hz.
-[33m86199a0[m Working pipeline at 30Hz.
-[33me6ce8c9[m Final fisrt stage with:
-[33m30fbbc8[m Fixed sychronization: now the pipeline is called every time a new frame is available. if the pipeline is busy and a new frame comes, it dropes it.
-[33m3855e40[m Added localization_timer to time each part of the pipeline.
-[33mf899c42[m[33m ([m[1;31morigin/main[m[33m)[m initial commit with bluerov and docker setup
