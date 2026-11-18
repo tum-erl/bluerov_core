@@ -92,3 +92,14 @@ ros2 run bluerov_core bluerov_system
 | `/rov/tags_markers` | `visualization_msgs/MarkerArray` | 3D visual cubes of active AprilTags in the world |
 | `/rov/pose_human_readable`| `std_msgs/String` | Human-readable XYZ (m) and RPY (degrees) string |
 | `/tf` / `/tf_static` | `tf2_msgs/TFMessage` | Dynamic ROV transforms and static tag locations |
+
+---
+
+## 5. Experimental Setup & Results
+
+Live water tank experiments demonstrating real-time AprilTag visual localization, tracking, and dual-camera monitoring:
+
+<p align="center">
+  <img src="image1.jpg" alt="Experiment Setup" width="48%">
+  <img src="image2.jpg" alt="Foxglove Studio View" width="48%">
+</p>
