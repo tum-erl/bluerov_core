@@ -43,21 +43,9 @@ source /root/ros2_ws/install/setup.bash
 
 ---
 
-## 2. Running Directly on Host (Without Docker)
+## 2. Running the System (3 Nodes)
 
-If you have ROS 2 Jazzy installed locally on Ubuntu 24.04:
-
-```bash
-cd ~/Projects/Robotics/BlueROV2_ws
-colcon build --packages-select bluerov_core --symlink-install
-source install/setup.bash
-```
-
----
-
-## 3. Running the System (3 Nodes)
-
-Run each of the following commands in a separate terminal:
+Run each of the following commands in a separate container terminal:
 
 ### Terminal 1: 3D Model / URDF Publisher
 Publishes the robot description and static links for Foxglove:
@@ -79,7 +67,7 @@ ros2 run bluerov_core bluerov_system
 
 ---
 
-## 4. Foxglove Studio Configuration
+## 3. Foxglove Studio Configuration
 
 1. Open **Foxglove Studio** and connect to `ws://localhost:8765` (or `ws://<HOST_IP>:8765`).
 2. Add panels:
@@ -94,14 +82,13 @@ ros2 run bluerov_core bluerov_system
 
 ---
 
-## 5. Topics Summary
+## 4. Topics Summary
 
 | Topic | Type | Description |
 |---|---|---|
 | `/camera/image_annotated` | `sensor_msgs/CompressedImage` | Primary camera feed with multi-colored AprilTag overlays |
 | `/camera2/image_annotated` | `sensor_msgs/CompressedImage` | Secondary inspection feed with green tag outlines |
 | `/rov/pose` | `geometry_msgs/PoseStamped` | 6-DoF ROV pose in FLU world coordinates |
-| `/rov/camera_pose` | `geometry_msgs/PoseStamped` | Camera 1 pose in world frame |
 | `/rov/tags_markers` | `visualization_msgs/MarkerArray` | 3D visual cubes of active AprilTags in the world |
 | `/rov/pose_human_readable`| `std_msgs/String` | Human-readable XYZ (m) and RPY (degrees) string |
 | `/tf` / `/tf_static` | `tf2_msgs/TFMessage` | Dynamic ROV transforms and static tag locations |
