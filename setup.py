@@ -30,11 +30,6 @@ setup(
     entry_points={
         'console_scripts': [
             'bluerov_system = bluerov_core.bluerov_system_node:main',
-            'localization = bluerov_core.localization_node:main',
-            'localization2 = bluerov_core.localization_node2:main',
-            'camera_publisher = bluerov_core.camera_publisher_node:main',
-            'camera_publisher2 = bluerov_core.camera_publisher2:main',
-            'laptop_cam_publisher = bluerov_core.laptop_camera_publisher_node:main'
         ],
     },
 )
