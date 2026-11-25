@@ -29,7 +29,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'bluerov_system = bluerov_core.bluerov_system_node:main',
+            'bluerov_system = bluerov_core.system_container:main',
         ],
     },
 )
