@@ -2,13 +2,14 @@
 
 ROS 2 Jazzy localization, vision, and telemetry pipeline for BlueROV2.
 
-Features:
-- **All-in-One Node (`bluerov_system_node`)**: High-rate visual localization (30+ FPS) using AprilTag detection (`tagStandard41h12`) with dual-engine PnP (Multi-tag SQPNP + Single-tag IPPE_SQUARE + EMA filtering).
-- **Dual Camera Support**: 
-  - Primary Camera (UDP port 5600): Navigation, 6-DoF pose estimation, and visual tracking overlay.
-  - Secondary Camera (UDP port 5604): Auxiliary inspection feed with auto-detection and green bounding boxes for AprilTags.
-- **Foxglove Studio Optimized**: Fast JPEG-compressed video streaming (960x540 downscaled) to minimize bandwidth and eliminate WebSocket latency.
-- **3D Visualization & URDF**: `robot_state_publisher` broadcasting 3D model transforms and physical tag markers.
+## Key Features
+- **Modular Zero-Copy Architecture**: Decomposed into lightweight, specialized nodes running concurrently via a `MultiThreadedExecutor` and communicating over high-speed thread-safe in-RAM ring buffers:
+  - `Camera1Node`: Primary UDP ingestion (port 5600).
+  - `Camera2Node`: Secondary auxiliary UDP ingestion (port 5604).
+  - `LocalizationNode`: AprilTag visual solver (`tagStandard41h12`) using textbook Dual-Engine PnP (Multi-tag SQPNP + Single-tag IPPE_SQUARE) in ROS FLU coordinates.
+  - `AnnotatedPublisherNode`: On-demand visual overlay rendering and lightweight JPEG compression only when subscribers are active (0% idle CPU overhead).
+- **Decoupled Launch System**: Run core localization independently in headless mode, launch Foxglove visualization on demand, or start everything together with an all-in-one master launch file.
+- **Foxglove Studio Integration**: Zero-latency JPEG-compressed video streaming (960x540 downscaled) with 1MB websocket buffer limits and full 3D URDF model tracking.
 
 ---
 
@@ -43,26 +44,32 @@ source /root/ros2_ws/install/setup.bash
 
 ---
 
-## 2. Running the System (3 Nodes)
+## 2. Launch Options
 
-Run each of the following commands in a separate container terminal:
+You can launch the system according to your operational needs:
 
-### Terminal 1: 3D Model / URDF Publisher
-Publishes the robot description and static links for Foxglove:
+### Option A: All-in-One Master Launch (Recommended for full operation)
+Starts the entire system (Core Localization + 3D URDF + Foxglove Bridge) in a single command:
 ```bash
-ros2 launch bluerov_core bringup.launch.py
+ros2 launch bluerov_core system.launch.py
 ```
 
-### Terminal 2: Foxglove WebSocket Bridge
-Connects ROS 2 topics to Foxglove Studio via WebSockets (`ws://localhost:8765`), setting a 1MB send buffer to guarantee real-time streaming with zero latency:
+### Option B: Decoupled Operation (Headless & On-Demand UI)
+
+#### Terminal 1: Core Localization (Headless)
+Runs only the cameras, AprilTag PnP localization, and pose publishing:
 ```bash
-ros2 run foxglove_bridge foxglove_bridge --ros-args -p send_buffer_limit:=1000000
+ros2 launch bluerov_core localization.launch.py
+```
+*Optional parameters:*
+```bash
+ros2 launch bluerov_core localization.launch.py cam1_port:=5600 cam2_port:=5604 enable_cam2:=true
 ```
 
-### Terminal 3: BlueROV All-in-One System Node
-Starts video ingestion (ports 5600 & 5604), tag detection, localization, and compressed image streams:
+#### Terminal 2: Visualization & Foxglove Bridge
+Publishes the robot URDF model and starts the Foxglove WebSocket bridge (`ws://localhost:8765`):
 ```bash
-ros2 run bluerov_core bluerov_system
+ros2 launch bluerov_core visualization.launch.py
 ```
 
 ---
@@ -71,8 +78,8 @@ ros2 run bluerov_core bluerov_system
 
 1. Open **Foxglove Studio** and connect to `ws://localhost:8765` (or `ws://<HOST_IP>:8765`).
 2. Add panels:
-   - **Image Panel 1**: Subscribe to `/camera/image_annotated` (Primary navigation camera with tags).
-   - **Image Panel 2**: Subscribe to `/camera2/image_annotated` (Secondary camera with green tags).
+   - **Image Panel 1**: Subscribe to `/camera/image_annotated` (Primary navigation camera with detected tags).
+   - **Image Panel 2**: Subscribe to `/camera2/image_annotated` (Secondary camera feed with tag overlays).
    - **3D Panel**: 
      - Set Fixed Frame: `world`
      - Enable **URDF** (`/robot_description`)
@@ -86,11 +93,12 @@ ros2 run bluerov_core bluerov_system
 
 | Topic | Type | Description |
 |---|---|---|
-| `/camera/image_annotated` | `sensor_msgs/CompressedImage` | Primary camera feed with multi-colored AprilTag overlays |
-| `/camera2/image_annotated` | `sensor_msgs/CompressedImage` | Secondary inspection feed with green tag outlines |
-| `/rov/pose` | `geometry_msgs/PoseStamped` | 6-DoF ROV pose in FLU world coordinates |
+| `/camera/image_annotated` | `sensor_msgs/CompressedImage` | Primary camera feed with multi-colored AprilTag overlays (on-demand) |
+| `/camera2/image_annotated` | `sensor_msgs/CompressedImage` | Secondary inspection feed with green tag outlines (on-demand) |
+| `/rov/pose` | `geometry_msgs/PoseStamped` | 6-DoF ROV pose in FLU world coordinates (published only when tags are visible) |
 | `/rov/tags_markers` | `visualization_msgs/MarkerArray` | 3D visual cubes of active AprilTags in the world |
-| `/rov/pose_human_readable`| `std_msgs/String` | Human-readable XYZ (m) and RPY (degrees) string |
+| `/rov/pose_human_readable`| `std_msgs/String` | Human-readable XYZ (m) and RPY (degrees) telemetry string |
+| `/robot_description` | `std_msgs/String` | BlueROV2 URDF description for 3D visualizers |
 | `/tf` / `/tf_static` | `tf2_msgs/TFMessage` | Dynamic ROV transforms and static tag locations |
 
 ---
