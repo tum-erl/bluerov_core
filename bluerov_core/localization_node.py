@@ -38,10 +38,6 @@ class LocalizationNode(Node):
 
         # Parameters
         self.declare_parameter("quad_decimate", 2.0)
-        self.declare_parameter("filter_alpha", 0.50)
-        self.declare_parameter("max_xy_bound", 2.5)
-        self.declare_parameter("max_z_bound", 0.50)
-        self.declare_parameter("max_lost_frames", 30)
 
         self.declare_parameter("world_frame_id", "world")
         self.declare_parameter("rov_frame_id", "rov")
@@ -49,10 +45,6 @@ class LocalizationNode(Node):
         self.declare_parameter("camera2_frame_id", "camera2_optical_frame")
 
         self.quad_decimate = float(self.get_parameter("quad_decimate").value)
-        self.filter_alpha = float(self.get_parameter("filter_alpha").value)
-        self.max_xy_bound = float(self.get_parameter("max_xy_bound").value)
-        self.max_z_bound = float(self.get_parameter("max_z_bound").value)
-        self.max_lost_frames = int(self.get_parameter("max_lost_frames").value)
 
         self.world_frame = self.get_parameter("world_frame_id").value
         self.rov_frame = self.get_parameter("rov_frame_id").value
@@ -83,13 +75,9 @@ class LocalizationNode(Node):
         # State tracking
         self.is_running = True
         self.frame_count = 0
-        self.lost_frames_count = 0
         self.prev_world_pos = None
         self.prev_R_wc = None
-        self.filtered_pos = None
-        self.filtered_quat = None
-        self.filtered_cam_pos = None
-        self.filtered_cam_quat = None
+        self.current_pose = None
         self.last_R_wb_flu = None
 
         self.last_fps_time = time.time()
@@ -210,17 +198,6 @@ class LocalizationNode(Node):
 
         self.tag_marker_pub.publish(marker_array)
 
-    def is_pose_physically_valid(self, t_wb, R_wc=None):
-        x = float(t_wb[0])
-        y = float(t_wb[1])
-        z = float(t_wb[2])
-
-        if z > self.max_z_bound:
-            return False
-        if abs(x) > self.max_xy_bound or abs(y) > self.max_xy_bound:
-            return False
-        return True
-
     def _process_loop(self):
         last_seq = -1
         while rclpy.ok() and self.is_running:
@@ -278,12 +255,11 @@ class LocalizationNode(Node):
                     t_wc = -R_wc @ tvec.reshape(3, 1)
                     t_wb = t_wc + R_wc @ CAMERA_TO_BODY_OFFSET.reshape(3, 1)
 
-                    if self.is_pose_physically_valid(t_wb, R_wc):
-                        R_wc_candidate = R_wc
-                        t_wb_candidate = t_wb
-                        t_wc_candidate = t_wc
-                        solved_new_pose = True
-                        mode_str = f"MULTI (tags {sorted(list(detected_tags.keys()))})"
+                    R_wc_candidate = R_wc
+                    t_wb_candidate = t_wb
+                    t_wc_candidate = t_wc
+                    solved_new_pose = True
+                    mode_str = f"MULTI (tags {sorted(list(detected_tags.keys()))})"
 
             # Engine B: Single-Tag PnP (1 tag or fallback)
             if not solved_new_pose and num_tags >= 1:
@@ -314,11 +290,10 @@ class LocalizationNode(Node):
                     valid_candidates = []
                     for rv, tv in candidate_solutions:
                         R_wc, t_wb, t_wc = ippe_solution_to_world_pos(rv, tv, R_tw, t_tw)
-                        if self.is_pose_physically_valid(t_wb, R_wc):
-                            pos_cost = float(np.linalg.norm(t_wb - self.prev_world_pos)) if self.prev_world_pos is not None else 0.0
-                            rot_cost = float(np.linalg.norm(R_wc - self.prev_R_wc)) if self.prev_R_wc is not None else -float(R_wc[2, 2])
-                            total_cost = pos_cost + 0.35 * rot_cost
-                            valid_candidates.append((total_cost, R_wc, t_wb, t_wc))
+                        pos_cost = float(np.linalg.norm(t_wb - self.prev_world_pos)) if self.prev_world_pos is not None else 0.0
+                        rot_cost = float(np.linalg.norm(R_wc - self.prev_R_wc)) if self.prev_R_wc is not None else -float(R_wc[2, 2])
+                        total_cost = pos_cost + 0.35 * rot_cost
+                        valid_candidates.append((total_cost, R_wc, t_wb, t_wc))
 
                     if valid_candidates:
                         valid_candidates.sort(key=lambda item: item[0])
@@ -326,9 +301,8 @@ class LocalizationNode(Node):
                         solved_new_pose = True
                         mode_str = f"SINGLE (tag {tag_id})"
 
-            # 3. Filtering & Pose Update
+            # 3. Raw Pose Extraction & Transformation (Direct measurements for EKF)
             if solved_new_pose and t_wb_candidate is not None:
-                self.lost_frames_count = 0
                 self.prev_world_pos = t_wb_candidate.copy()
                 self.prev_R_wc = R_wc_candidate.copy()
 
@@ -342,34 +316,11 @@ class LocalizationNode(Node):
 
                 raw_pos = np.array([float(t_wb_flu[0]), float(t_wb_flu[1]), float(t_wb_flu[2])])
                 raw_quat = [float(qx_r), float(qy_r), float(qz_r), float(qw_r)]
-                raw_cam_pos = np.array([float(t_wc_flu[0]), float(t_wc_flu[1]), float(t_wc_flu[2])])
-                raw_cam_quat = [float(qx_c), float(qy_c), float(qz_c), float(qw_c)]
-
-                if self.filtered_pos is None:
-                    self.filtered_pos = raw_pos
-                    self.filtered_quat = raw_quat
-                    self.filtered_cam_pos = raw_cam_pos
-                    self.filtered_cam_quat = raw_cam_quat
-                else:
-                    alpha = self.filter_alpha
-                    self.filtered_pos = alpha * raw_pos + (1.0 - alpha) * self.filtered_pos
-                    self.filtered_quat = list(quaternion_nlerp(self.filtered_quat, raw_quat, alpha=alpha))
-                    self.filtered_cam_pos = alpha * raw_cam_pos + (1.0 - alpha) * self.filtered_cam_pos
-                    self.filtered_cam_quat = list(quaternion_nlerp(self.filtered_cam_quat, raw_cam_quat, alpha=alpha))
-
+                self.current_pose = (raw_pos, raw_quat)
                 self.last_R_wb_flu = R_wb_flu
-            else:
-                self.lost_frames_count += 1
-                if self.lost_frames_count > self.max_lost_frames:
-                    self.filtered_pos = None
-                    self.filtered_quat = None
-                    self.prev_world_pos = None
-                    self.prev_R_wc = None
 
-            # 4. Broadcast TF & Publish Pose
-            if self.filtered_pos is not None:
-                x_b, y_b, z_b = self.filtered_pos
-                qx_r, qy_r, qz_r, qw_r = self.filtered_quat
+                # 4. Publish Pose & TF only when tags are visible (no holding)
+                x_b, y_b, z_b = raw_pos
 
                 pose_msg = PoseStamped()
                 pose_msg.header.stamp = now_stamp
@@ -413,15 +364,13 @@ class LocalizationNode(Node):
 
                 self.tf_broadcaster.sendTransform([t_stamped_rov, t_stamped_cam])
 
-                if self.last_R_wb_flu is not None:
-                    roll, pitch, yaw = rotation_matrix_to_rpy(self.last_R_wb_flu)
-                    rpy_str = f"RPY: R={roll:+.1f}° P={pitch:+.1f}° Y={yaw:+.1f}°"
-                else:
-                    rpy_str = ""
-
-                status_text = "TRACKING" if self.lost_frames_count == 0 else f"HOLDING ({self.lost_frames_count}/{self.max_lost_frames})"
-                msg_str = f"[{status_text} | {mode_str}] ROV: X={x_b:+.3f}, Y={y_b:+.3f}, Z={z_b:+.3f} | {rpy_str}"
+                roll, pitch, yaw = rotation_matrix_to_rpy(self.last_R_wb_flu)
+                rpy_str = f"RPY: R={roll:+.1f}° P={pitch:+.1f}° Y={yaw:+.1f}°"
+                msg_str = f"[TRACKING | {mode_str}] ROV: X={x_b:+.3f}, Y={y_b:+.3f}, Z={z_b:+.3f} | {rpy_str}"
                 self.human_pub.publish(String(data=msg_str))
+            else:
+                self.current_pose = None
+                self.last_R_wb_flu = None
 
             # Periodic terminal print & Live FPS measurement (1 Hz)
             self.fps_frame_count += 1
@@ -431,8 +380,9 @@ class LocalizationNode(Node):
                 self.current_fps = self.fps_frame_count / dt
                 self.fps_frame_count = 0
                 self.last_fps_time = now_time
-                if self.filtered_pos is not None:
-                    x_b, y_b, z_b = self.filtered_pos
+                if self.current_pose is not None:
+                    raw_pos, _ = self.current_pose
+                    x_b, y_b, z_b = raw_pos
                     print(f"[{self.current_fps:4.1f} Hz] ROV FLU: X={x_b:+.3f}, Y={y_b:+.3f}, Z={z_b:+.3f} | {mode_str}")
 
     def destroy_node(self):
