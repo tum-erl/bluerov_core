@@ -92,7 +92,7 @@ Streams a recorded `.mp4` file as an H.264 RTP/UDP stream to `127.0.0.1:5600`, s
    ```bash
    ros2 run bluerov_core replay_camera --loop
    ```
-   *(To specify a file: `ros2 run bluerov_core replay_camera --video recordings/video_YYYYMMDD_HHMMSS.mp4 --loop`)*
+   *(To specify a file: `ros2 run bluerov_core replay_camera --video recordings/video_name.mp4 --loop`)*
 
 2. **Terminal 2** (Launch the full localization & visualization pipeline):
    ```bash
