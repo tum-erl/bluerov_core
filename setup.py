@@ -30,6 +30,7 @@ setup(
     entry_points={
         'console_scripts': [
             'bluerov_system = bluerov_core.system_container:main',
+            'replay_camera = bluerov_core.0replay_camera:main',
         ],
     },
 )

@@ -19,12 +19,18 @@ def generate_launch_description():
         Node(
             package='bluerov_core',
             executable='bluerov_system',
-            name='bluerov_modular_system',
             output='screen',
             parameters=[{
-                'cam1_port': LaunchConfiguration('cam1_port'),
-                'cam2_port': LaunchConfiguration('cam2_port'),
-                'enable_cam2': LaunchConfiguration('enable_cam2'),
+                'camera1_node': {
+                    'cam1_port': LaunchConfiguration('cam1_port'),
+                },
+                'camera2_node': {
+                    'cam2_port': LaunchConfiguration('cam2_port'),
+                    'enable_cam2': LaunchConfiguration('enable_cam2'),
+                },
+                'annotated_publisher_node': {
+                    'enable_cam2': LaunchConfiguration('enable_cam2'),
+                },
             }]
         )
     ])

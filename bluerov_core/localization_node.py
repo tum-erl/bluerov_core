@@ -383,7 +383,12 @@ class LocalizationNode(Node):
                 if self.current_pose is not None:
                     raw_pos, _ = self.current_pose
                     x_b, y_b, z_b = raw_pos
-                    print(f"[{self.current_fps:4.1f} Hz] ROV FLU: X={x_b:+.3f}, Y={y_b:+.3f}, Z={z_b:+.3f} | {mode_str}")
+                    print(
+                        f"[{self.current_fps:4.1f} Hz] ROV FLU: X={x_b:+.3f}, Y={y_b:+.3f}, Z={z_b:+.3f} | {mode_str}",
+                        flush=True,
+                    )
+                else:
+                    print(f"[{self.current_fps:4.1f} Hz] NO TAGS DETECTED", flush=True)
 
     def destroy_node(self):
         self.is_running = False

@@ -74,7 +74,34 @@ ros2 launch bluerov_core visualization.launch.py
 
 ---
 
-## 3. Foxglove Studio Configuration
+## 3. Recording & Offline Replay (Camera 1)
+
+You can record raw video from the BlueROV2 primary camera and replay it later offline to test localization and Foxglove visualization without connecting to the robot.
+
+### A. Record Video
+Captures the GStreamer H.264 UDP stream on port `5600` and saves it to `recordings/video_<timestamp>.mp4`:
+```bash
+python3 bluerov_core/0take_video.py
+```
+*(Press `Ctrl+C` or `q` in the preview window to stop recording and save the file).*
+
+### B. Replay Video (Offline Simulation)
+Streams a recorded `.mp4` file as an H.264 RTP/UDP stream to `127.0.0.1:5600`, simulating Camera 1:
+
+1. **Terminal 1** (Start the replay — uses the latest video in `recordings/` by default):
+   ```bash
+   ros2 run bluerov_core replay_camera --loop
+   ```
+   *(To specify a file: `ros2 run bluerov_core replay_camera --video recordings/video_YYYYMMDD_HHMMSS.mp4 --loop`)*
+
+2. **Terminal 2** (Launch the full localization & visualization pipeline):
+   ```bash
+   ros2 launch bluerov_core system.launch.py enable_cam2:=false
+   ```
+
+---
+
+## 4. Foxglove Studio Configuration
 
 1. Open **Foxglove Studio** and connect to `ws://localhost:8765` (or `ws://<HOST_IP>:8765`).
 2. Add panels:
@@ -89,7 +116,7 @@ ros2 launch bluerov_core visualization.launch.py
 
 ---
 
-## 4. Topics Summary
+## 5. Topics Summary
 
 | Topic | Type | Description |
 |---|---|---|
@@ -103,7 +130,7 @@ ros2 launch bluerov_core visualization.launch.py
 
 ---
 
-## 5. Experimental Setup & Results
+## 6. Experimental Setup & Results
 
 Live water tank experiments demonstrating real-time AprilTag visual localization, tracking, and dual-camera monitoring:
 
