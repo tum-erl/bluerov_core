@@ -52,7 +52,7 @@ class ReplayDataNode(Node):
         self.cam1_port = int(self.get_parameter("cam1_port").value)
         self.imu_topic = self.get_parameter("imu_topic").value
         self.imu_frame_id = self.get_parameter("imu_frame_id").value
-        self.loop = bool(self.get_parameter("loop").value)
+        self.loop = bool(self.get_parameter("loop").value) or ("--loop" in sys.argv) or ("-loop" in sys.argv)
         self.playback_rate = max(0.1, float(self.get_parameter("playback_rate").value))
 
         if not data_dir:

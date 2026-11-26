@@ -41,7 +41,6 @@ def generate_launch_description():
         package='mavros',
         executable='mavros_node',
         name='mavros',
-        namespace='mavros',
         output=LaunchConfiguration('log_output'),
         parameters=[{
             'fcu_url': LaunchConfiguration('fcu_url'),

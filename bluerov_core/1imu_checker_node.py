@@ -6,6 +6,7 @@ Prints orientation, angular velocity and linear acceleration.
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Imu
 import numpy as np
 
@@ -38,7 +39,7 @@ class ImuCheckerNode(Node):
             Imu,
             '/mavros/imu/data',
             self.imu_callback,
-            10
+            qos_profile_sensor_data
         )
 
         self.msg_count = 0

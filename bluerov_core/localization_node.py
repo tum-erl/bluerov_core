@@ -82,6 +82,7 @@ class LocalizationNode(Node):
 
         self.last_fps_time = time.time()
         self.fps_frame_count = 0
+        self.pose_pub_count = 0
         self.current_fps = 0.0
 
         # Processing thread
@@ -333,6 +334,7 @@ class LocalizationNode(Node):
                 pose_msg.pose.orientation.z = float(qz_r)
                 pose_msg.pose.orientation.w = float(qw_r)
                 self.pose_pub.publish(pose_msg)
+                self.pose_pub_count += 1
 
                 # TF: world -> rov
                 t_stamped_rov = TransformStamped()
@@ -372,18 +374,26 @@ class LocalizationNode(Node):
                 self.current_pose = None
                 self.last_R_wb_flu = None
 
-            # Periodic terminal print & Live FPS measurement (1 Hz)
+            # Periodic terminal print & Live Pose Hz measurement (1 Hz)
             self.fps_frame_count += 1
             now_time = time.time()
             dt = now_time - self.last_fps_time
             if dt >= 1.0:
                 self.current_fps = self.fps_frame_count / dt
+                pose_hz = self.pose_pub_count / dt
                 self.fps_frame_count = 0
+                self.pose_pub_count = 0
                 self.last_fps_time = now_time
                 if self.current_pose is not None:
                     raw_pos, _ = self.current_pose
                     x_b, y_b, z_b = raw_pos
-                    print(f"[{self.current_fps:4.1f} Hz] ROV FLU: X={x_b:+.3f}, Y={y_b:+.3f}, Z={z_b:+.3f} | {mode_str}")
+                    print(
+                        f"[Pose: {pose_hz:4.1f} Hz] Tags: {num_tags} | "
+                        f"ROV FLU: X={x_b:+.3f}, Y={y_b:+.3f}, Z={z_b:+.3f} | {mode_str}",
+                        flush=True,
+                    )
+                else:
+                    print(f"[Pose: {pose_hz:4.1f} Hz] Tags: {num_tags} | ROV FLU: NO POSE", flush=True)
 
     def destroy_node(self):
         self.is_running = False
