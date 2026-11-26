@@ -30,6 +30,9 @@ setup(
     entry_points={
         'console_scripts': [
             'bluerov_system = bluerov_core.system_container:main',
+            'imu_checker = bluerov_core.imu_checker_node:main',
+            'record_data = bluerov_core.record_data_node:main',
+            'replay_data = bluerov_core.replay_data_node:main',
         ],
     },
 )
