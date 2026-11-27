@@ -1,13 +1,14 @@
 # BlueROV2 Core
 
-ROS 2 Jazzy localization, vision, and telemetry pipeline for BlueROV2.
+ROS 2 Jazzy localization pipeline using AprilTags for BlueROV2.
 
 ## Key Features
-- **Modular Zero-Copy Architecture**: Decomposed into lightweight, specialized nodes running concurrently via a `MultiThreadedExecutor` and communicating over high-speed thread-safe in-RAM ring buffers:
-  - `Camera1Node`: Primary UDP ingestion (port 5600).
-  - `Camera2Node`: Secondary auxiliary UDP ingestion (port 5604).
-  - `LocalizationNode`: AprilTag visual solver (`tagStandard41h12`) using textbook Dual-Engine PnP (Multi-tag SQPNP + Single-tag IPPE_SQUARE) in ROS FLU coordinates.
-  - `AnnotatedPublisherNode`: On-demand visual overlay rendering and lightweight JPEG compression only when subscribers are active (0% idle CPU overhead).
+- **Specialized Modular Nodes**: The pipeline is split into 4 clear, single-purpose nodes:
+  - `Camera1Node`: Captures the primary camera video stream from UDP port `5600` via GStreamer.
+  - `Camera2Node`: Captures the secondary camera video stream from UDP port `5604` via GStreamer (even thouht it is not used for the localization).
+  - `LocalizationNode`: Detects AprilTags (`tagStandard41h12`) and computes the 3D ROV pose using OpenCV PnP (Multi-tag SQPNP + Single-tag IPPE_SQUARE).
+  - `AnnotatedPublisherNode`: Draws tag overlays on the video and publishes lightweight JPEG frames only when a subscriber is actively listening (0% idle CPU overhead).
+- **Zero-Copy RAM Sharing**: All 4 nodes run inside a single process (`MultiThreadedExecutor`) and exchange raw frames directly through thread-safe in-RAM ring buffers, keeping the code clean and modular with zero network or ROS serialization latency.
 - **Decoupled Launch System**: Run core localization independently in headless mode, launch Foxglove visualization on demand, or start everything together with an all-in-one master launch file.
 - **Foxglove Studio Integration**: Zero-latency JPEG-compressed video streaming (960x540 downscaled) with 1MB websocket buffer limits and full 3D URDF model tracking.
 
@@ -31,22 +32,24 @@ docker build -t bluerov_core .
 ### C. Build the Workspace
 Inside the container terminal:
 ```bash
-cd /root/ros2_ws
 colcon build --packages-select bluerov_core --symlink-install
 source install/setup.bash
 ```
 
-To open additional terminals inside the same running container:
+To open additional terminals inside the same running container, run:
 ```bash
 docker exec -it ros2_container bash
-source /root/ros2_ws/install/setup.bash
+```
+And inside the new terminal:
+```bash
+source install/setup.bash
 ```
 
 ---
 
-## 2. Launch Options
+## 2. Live Operation (Connected to BlueROV2)
 
-You can launch the system according to your operational needs:
+When connected to the physical BlueROV2, you can launch the system according to your operational needs:
 
 ### Option A: All-in-One Master Launch (Recommended for full operation)
 Starts the entire system (Core Localization + 3D URDF + Foxglove Bridge) in a single command:
@@ -74,30 +77,27 @@ ros2 launch bluerov_core visualization.launch.py
 
 ---
 
-## 3. Recording & Offline Replay (Camera 1)
+## 3. Offline Testing (Using Recorded Videos)
 
-You can record raw video from the BlueROV2 primary camera and replay it later offline to test localization and Foxglove visualization without connecting to the robot.
+You can test and run the entire AprilTag localization & Foxglove visualization pipeline **without a physical BlueROV2**, using the pre-recorded air datasets included in the `recordings/` directory *(captured using `bluerov_core/0take_video.py`)*.
 
-### A. Record Video
-Captures the GStreamer H.264 UDP stream on port `5600` and saves it to `recordings/video_<timestamp>.mp4`:
-```bash
-python3 bluerov_core/0take_video.py
-```
-*(Press `Ctrl+C` or `q` in the preview window to stop recording and save the file).*
+The `replay_camera` node replaces the physical robot by streaming any `.mp4` file as a live H.264 RTP/UDP feed to `127.0.0.1:5600`, so the rest of the ROS 2 pipeline runs identically to live operation:
 
-### B. Replay Video (Offline Simulation)
-Streams a recorded `.mp4` file as an H.264 RTP/UDP stream to `127.0.0.1:5600`, simulating Camera 1:
-
-1. **Terminal 1** (Start the replay — uses the latest video in `recordings/` by default):
+1. **Terminal 1** (Start the simulated Camera 1 stream — uses the latest video in `recordings/` by default):
    ```bash
    ros2 run bluerov_core replay_camera --loop
    ```
-   *(To specify a file: `ros2 run bluerov_core replay_camera --video recordings/video_name.mp4 --loop`)*
+   *(To choose a specific video from the repository:)*
+   ```bash
+   ros2 run bluerov_core replay_camera --video recordings/video_tag2_only.mp4 --loop
+   ```
 
 2. **Terminal 2** (Launch the full localization & visualization pipeline):
    ```bash
    ros2 launch bluerov_core system.launch.py enable_cam2:=false
    ```
+
+> **Note:** Before running either Live Operation or Offline Testing, make sure you have selected the appropriate camera calibration parameters (**air** vs **water**) inside `bluerov_core/common.py`.
 
 ---
 
