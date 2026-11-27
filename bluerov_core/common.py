@@ -15,28 +15,35 @@ import cv2
 # ==============================================================================
 REFERENCE_TAG_ID = 2
 TAG_FAMILY = "tagStandard41h12"
-SMALL_TAG_SIZE = 0.05
-BIG_TAG_SIZE = 0.126
+SMALL_TAG_SIZE = 0.027777
+BIG_TAG_SIZE = 0.07
 
 TAG_MAP = {
     2: {"pos": [0.0, 0.0, 0.0], "rpy": [0.0, 0.0, 0.0], "size": BIG_TAG_SIZE},
     1: {"pos": [0.24, 0.265, 0.02], "rpy": [0.0, 90.0, 0.0], "size": BIG_TAG_SIZE},
     3: {"pos": [-0.30, 0.13, 0.0], "rpy": [0.0, 90.0, 0.0], "size": BIG_TAG_SIZE},
-    9: {"pos": [0.0, 0.575, 0.0], "rpy": [270.0, 0.0, 0.0], "size": BIG_TAG_SIZE},
+    9: {"pos": [0.0, 0.575, 0.10], "rpy": [270.0, 0.0, 0.0], "size": BIG_TAG_SIZE},
 
     1001: {"pos": [-0.260, 0.285, 0.01], "rpy": [0.0, 270.0, 0.0], "size": SMALL_TAG_SIZE},
     1003: {"pos": [0.285, 0.098, 0.0], "rpy": [0.0, 270.0, 0.0], "size": SMALL_TAG_SIZE}
 }
 
 # ROV Camera calibration parameters in water
+# FRAME_WIDTH = 1920
+# FRAME_HEIGHT = 1080
+# FX, FY, CX, CY = 1055.3052, 1054.4018, 977.0207, 600.9562
+# K = np.array([[FX, 0.0, CX], [0.0, FY, CY], [0.0, 0.0, 1.0]], dtype=np.float64)
+# D = np.array([-0.00458762, 0.06154082, 0.00437917, 0.00265318, -0.06060720], dtype=np.float64)
+
+# ROV Camera calibration parameters in air
 FRAME_WIDTH = 1920
 FRAME_HEIGHT = 1080
-FX, FY, CX, CY = 1055.3052, 1054.4018, 977.0207, 600.9562
-K = np.array([[FX, 0.0, CX], [0.0, FY, CY], [0.0, 0.0, 1.0]], dtype=np.float64)
-D = np.array([-0.00458762, 0.06154082, 0.00437917, 0.00265318, -0.06060720], dtype=np.float64)
+FX, FY, CX, CY = 1035.7549, 1036.4702, 971.0844, 605.2601
+K = np.array([[FX, 0.0, CX],[0.0, FY, CY],[0.0, 0.0, 1.0]], dtype=np.float64)
+D = np.array([-0.01495590, 0.05971814, 0.00197232, 0.00178856, -0.05786127], dtype=np.float64)
 
 # Camera offset relative to ROV body center (in meters, optical frame)
-CAMERA_TO_BODY_OFFSET = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+CAMERA_TO_BODY_OFFSET = np.array([0.0, 0.0, -0.20], dtype=np.float64)
 
 # Rotation matrix: Optical Camera Frame (X right, Y down, Z forward) -> FLU Body Frame (X fwd, Y left, Z up)
 R_OPTICAL_TO_BODY = np.array([
